@@ -240,6 +240,11 @@ mkdir -p "${STAGING}/opt/agent"
 cp -a "${OVERLAY}/opt/agent/"* "${STAGING}/opt/agent/"
 chmod 755 "${STAGING}/opt/agent/start.sh"
 
+# Copy tool registry and explore-tools CLI
+cp -a "${OVERLAY}/opt/tools" "${STAGING}/opt/tools"
+chmod 755 "${STAGING}/opt/tools/explore-tools"
+ln -sf /opt/tools/explore-tools "${STAGING}/usr/local/bin/explore-tools"
+
 # Install Python dependencies via uv
 chroot "${STAGING}" bash -c '
 cd /opt/agent

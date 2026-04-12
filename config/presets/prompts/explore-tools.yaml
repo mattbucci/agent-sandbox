@@ -1,0 +1,43 @@
+name: explore-tools
+description: "Rules for discovering and using CLI tools via the explore-tools registry"
+rules:
+  - id: TOOLS-001
+    rule: "Before using an unfamiliar tool, run 'explore-tools show <tool>' to read its documentation and examples."
+    example: |
+      # GOOD [TOOLS-001]:
+      # Don't know how trivy works? Look it up first:
+      explore-tools show trivy
+      # Now use it based on the documented examples:
+      trivy fs --severity HIGH,CRITICAL .
+
+      # BAD [TOOLS-001]:
+      # Guessing at flags and hoping for the best:
+      trivy scan --all --output report.txt  # wrong flags
+
+  - id: TOOLS-002
+    rule: "Use 'explore-tools suggest' to find the right tool for a task. Use 'explore-tools search' for keyword lookups. Use 'explore-tools ask' for complex questions."
+    example: |
+      # GOOD [TOOLS-002]:
+      # Need to scan for vulnerabilities but don't know which tool?
+      explore-tools suggest "scan Python project for CVEs"
+      # → suggests trivy, pip-audit, grype
+
+      # Need to parse JSON from an API?
+      explore-tools search "json"
+      # → shows jq, curl
+
+      # Complex question? Ask the LLM subagent:
+      explore-tools ask "how do I fill a login form on a website?"
+      # → explains agent-browser snapshot/fill/click workflow
+
+  - id: TOOLS-003
+    rule: "Use 'explore-tools list' to browse all available tools by category before starting a task."
+    example: |
+      # GOOD [TOOLS-003]:
+      # Starting a new task? See what tools you have:
+      explore-tools list
+      # → shows browser/, git/, security/, dev/, data/, system/, research/
+
+      # Zoom into a category:
+      explore-tools list security
+      # → trivy, semgrep, nmap, grype, pip-audit

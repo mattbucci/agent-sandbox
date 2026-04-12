@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""
+explore-tools — Discover and learn about available CLI tools
+
+An AI agent's interface to its tool registry. Tools are documented in
+/opt/tools/ as markdown files organized by category. This CLI searches,
+lists, and explains tools — optionally using the LLM for contextual help.
+
+Usage:
+  explore-tools list                    List all categories
+  explore-tools list <category>         List tools in a category
+  explore-tools show <tool>             Show full documentation for a tool
+  explore-tools search <query>          Search tool docs by keyword
+  explore-tools ask "<question>"        Ask the LLM subagent about tools
+  explore-tools suggest "<task>"        Get tool recommendations for a task
+
+Examples:
+  explore-tools list
+  explore-tools list security
+  explore-tools show agent-browser
+  explore-tools search "json parsing"
+  explore-tools ask "how do I interact with a web form?"
+  explore-tools suggest "scan a Python project for CVEs"
+"""
+
+import os
+import sys
+import json
+import re
+from pathlib import Path
+
+TOOLS_DIR = Path("/opt/tools")
+
+
+def load_tool_index():
+    """Build an index of all tools from the registry."""
+    tools = {}
+    if not TOOLS_DIR.exists():
+        return tools
+
+    for md_file in sorted(TOOLS_DIR.rglob("*.md")):
+        category = md_file.parent.name
+        tool_name = md_file.stem
+        content = md_file.read_text()
+
+        # Extract one-liner description (first blockquote line)
+        desc = ""
+        for line in content.split("\n"):
+            if line.startswith(">"):
+                desc = line.lstrip("> ").strip()
+                break
+
+        tools[tool_name] = {
+            "name": tool_name,
+            "category": category,
+            "description": desc,
+            "path": str(md_file),
+            "content": content,
+        }
+
+    return tools
+
+
+def cmd_list(args):
+    """List categories or tools within a category."""
+    tools = load_tool_index()
+
+    if not args:
+        # List categories
+        categories = {}
+        for t in tools.values():
+            cat = t["category"]
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(t)
+
+        print("Tool Categories:\n")
+        for cat in sorted(categories):
+            tool_names = [t["name"] for t in categories[cat]]
+            print(f"  {cat}/")
+            for name in sorted(tool_names):
+                desc = tools[name]["description"]
+                print(f"    {name:20s} {desc}")
+            print()
+
+        print(f"Total: {len(tools)} tools in {len(categories)} categories")
+        print("\nUsage: explore-tools list <category>")
+        print("       explore-tools show <tool>")
+    else:
+        # List tools in a specific category
+        category = args[0]
+        matches = {n: t for n, t in tools.items() if t["category"] == category}
+
+        if not matches:
+            print(f"Category '{category}' not found.")
+            print(f"Available: {', '.join(sorted(set(t['category'] for t in tools.values())))}")
+            return
+
+        print(f"\n{category}/ tools:\n")
+        for name in sorted(matches):
+            t = matches[name]
+            print(f"  {name:20s} {t['description']}")
+        print(f"\nUse: explore-tools show <tool> for full documentation")
+
+
+def cmd_show(args):
+    """Show full documentation for a tool."""
+    if not args:
+        print("Usage: explore-tools show <tool-name>")
+        return
+
+    tools = load_tool_index()
+    name = args[0]
+
+    if name in tools:
+        print(tools[name]["content"])
+    else:
+        # Fuzzy match
+        matches = [n for n in tools if name.lower() in n.lower()]
+        if matches:
+            print(f"Tool '{name}' not found. Did you mean: {', '.join(matches)}?")
+        else:
+            print(f"Tool '{name}' not found. Use 'explore-tools list' to see available tools.")
+
+
+def cmd_search(args):
+    """Search tool documentation by keyword."""
+    if not args:
+        print("Usage: explore-tools search <keyword>")
+        return
+
+    tools = load_tool_index()
+    query = " ".join(args).lower()
+    results = []
+
+    for name, tool in tools.items():
+        content_lower = tool["content"].lower()
+        desc_lower = tool["description"].lower()
+
+        # Score: name match > description match > content match
+        score = 0
+        if query in name.lower():
+            score += 10
+        if query in desc_lower:
+            score += 5
+
+        # Count keyword occurrences in content
+        occurrences = content_lower.count(query)
+        if occurrences > 0:
+            score += min(occurrences, 5)
+
+        if score > 0:
+            # Find a matching line for context
+            context = ""
+            for line in tool["content"].split("\n"):
+                if query in line.lower() and not line.startswith("#"):
+                    context = line.strip()[:80]
+                    break
+
+            results.append((score, name, tool["category"], tool["description"], context))
+
+    results.sort(key=lambda x: -x[0])
+
+    if not results:
+        print(f"No tools found matching '{query}'.")
+        print("Try: explore-tools list")
+        return
+
+    print(f"\nSearch results for '{query}':\n")
+    for score, name, cat, desc, context in results[:10]:
+        print(f"  {name:20s} [{cat}] {desc}")
+        if context:
+            print(f"    → {context}")
+    print(f"\nUse: explore-tools show <tool> for full documentation")
+
+
+def cmd_ask(args):
+    """Ask the LLM subagent about tools (requires LLM endpoint)."""
+    if not args:
+        print("Usage: explore-tools ask \"<question>\"")
+        return
+
+    question = " ".join(args)
+    tools = load_tool_index()
+
+    # Build a compact tool summary for the LLM
+    tool_summary = "Available tools:\n"
+    for name in sorted(tools):
+        t = tools[name]
+        tool_summary += f"- {name} [{t['category']}]: {t['description']}\n"
+
+    # Check for LLM endpoint
+    api_base = os.environ.get("LLM_API_BASE") or os.environ.get("OPENAI_API_BASE")
+    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    model = os.environ.get("LLM_MODEL", "default-model")
+
+    if not api_base:
+        # Fallback: keyword search instead of LLM
+        print("(No LLM endpoint configured — falling back to keyword search)\n")
+        cmd_search(args)
+        return
+
+    try:
+        import urllib.request
+
+        # Find relevant tools by keyword first to include their full docs
+        relevant_docs = ""
+        for name, tool in tools.items():
+            if any(word.lower() in tool["content"].lower() for word in question.split()):
+                relevant_docs += f"\n---\n{tool['content']}\n"
+
+        # Limit context size
+        if len(relevant_docs) > 8000:
+            relevant_docs = relevant_docs[:8000] + "\n... (truncated)"
+
+        prompt = f"""You are a tool recommendation assistant for an AI agent sandbox.
+The agent can run bash commands and has these CLI tools installed:
+
+{tool_summary}
+
+Relevant tool documentation:
+{relevant_docs}
+
+Question: {question}
+
+Answer concisely: which tool(s) to use and show the exact commands. If multiple tools could work, recommend the best one first."""
+
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{api_base}/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+            answer = result["choices"][0]["message"]["content"]
+            print(answer)
+
+    except Exception as e:
+        print(f"LLM request failed: {e}")
+        print("\nFalling back to keyword search:\n")
+        cmd_search(args)
+
+
+def cmd_suggest(args):
+    """Suggest tools for a specific task."""
+    if not args:
+        print("Usage: explore-tools suggest \"<task description>\"")
+        return
+
+    task = " ".join(args).lower()
+    tools = load_tool_index()
+
+    # Task-to-tool mapping heuristics
+    task_patterns = {
+        "web|browse|page|click|form|login|screenshot": ["agent-browser", "curl"],
+        "json|api|parse|extract|filter": ["jq", "curl"],
+        "git|commit|branch|clone|push|pull": ["git"],
+        "issue|pr|pull.request|github|review": ["gh", "git"],
+        "scan|vulnerab|cve|security|audit": ["trivy", "semgrep", "grype", "pip-audit"],
+        "pentest|port.scan|network|nmap": ["nmap"],
+        "python|pip|pytest|venv": ["python3", "uv"],
+        "node|npm|typescript|javascript": ["node"],
+        "docker|container|image": ["docker"],
+        "search|find|grep|locate": ["grep", "find"],
+        "text|replace|transform|sed": ["sed", "awk"],
+        "article|read|extract.text|markdown": ["readability-cli", "pandoc"],
+        "convert|pdf|html|document": ["pandoc"],
+        "download|fetch|http|request": ["curl"],
+    }
+
+    suggestions = []
+    for pattern, tool_names in task_patterns.items():
+        if re.search(pattern, task):
+            for name in tool_names:
+                if name in tools and name not in [s[0] for s in suggestions]:
+                    t = tools[name]
+                    suggestions.append((name, t["category"], t["description"]))
+
+    if not suggestions:
+        print(f"No direct tool match for: {task}")
+        print("Try: explore-tools search <keyword>")
+        print("  or: explore-tools ask \"<question>\" (uses LLM for smarter matching)")
+        return
+
+    print(f"\nSuggested tools for: \"{' '.join(args)}\"\n")
+    for name, cat, desc in suggestions:
+        print(f"  {name:20s} [{cat}] {desc}")
+    print(f"\nUse: explore-tools show <tool> for full documentation and examples")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    commands = {
+        "list": cmd_list,
+        "show": cmd_show,
+        "search": cmd_search,
+        "ask": cmd_ask,
+        "suggest": cmd_suggest,
+    }
+
+    if cmd in commands:
+        commands[cmd](args)
+    elif cmd in ("--help", "-h", "help"):
+        print(__doc__)
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Commands: list, show, search, ask, suggest")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
