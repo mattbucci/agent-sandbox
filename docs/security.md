@@ -118,12 +118,28 @@ The test suite attempts the following attacks from inside VMs:
 7. **Network scanning** — attempt to discover host services beyond allowed ports
 8. **Resource exhaustion** — fork bomb, memory allocation, disk fill (limited scope)
 
+## Known Accepted Risks
+
+These are inherent to the architecture and cannot be fully eliminated:
+
+| Risk | Detail | Mitigation |
+|------|--------|------------|
+| **LLM endpoint as exfil channel** | The LLM server is always allowed. Agent can encode stolen data in prompts. LLM operator sees everything in plaintext. | Audit LLM request logs. Add prompt scanning for credential patterns (regex for `sk-`, SSH keys, etc.) on the LiteLLM proxy. |
+| **Allowed domain API as C2** | If github.com is allowed, the GitHub API (gists, issues) can be used as a dead-drop C2 channel. Agent reads commands from public repos, writes exfil data to gists. | Restrict GitHub access to specific repos/orgs (not all of github.com). Audit `gh` CLI auth tokens. Monitor Squid logs for API endpoint patterns. |
+| **HTTP header exfil** | Agent can encode data in HTTP headers (User-Agent, cookies) to any allowed domain. | Monitor Squid access logs for anomalous header sizes or patterns. |
+| **Timing side-channels** | Inherent to any system with network access. | Accept as residual risk. |
+
 ## Hardening Checklist
 
+- [x] Disable IPv6 in guest (`ipv6.disable=1` kernel boot param) — prevents IPv6 filter bypass
+- [x] Block host SSH from VMs (nftables INPUT chain drop on tcp/22 from tap-vm*)
+- [x] Block ICMP to external hosts (remove broad squid-outbound forward rule)
 - [ ] Switch from raw `firecracker` to `jailer` (adds seccomp + chroot + uid drop)
 - [ ] Enable Squid access logging and ship to central log
 - [ ] Add dnsmasq query rate limiting
 - [ ] Block TLS ECH at Squid level
 - [ ] Rotate API keys per VM boot (consider Vault integration)
 - [ ] Add resource monitoring alerts (CPU/RAM/disk per VM)
+- [ ] Add LLM request logging/prompt scanning on LiteLLM proxy
+- [ ] Restrict GitHub API access to specific repos (not all of github.com)
 - [ ] Regular security test runs via CI
