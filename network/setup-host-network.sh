@@ -61,14 +61,18 @@ nft delete table ip vm_filter 2>/dev/null || true
 
 nft -f - <<'NFT'
 table ip vm_filter {
+    chain input {
+        type filter hook input priority 0; policy accept;
+
+        # Block VMs from reaching host SSH
+        iifname "tap-vm*" tcp dport 22 drop comment "block-vm-to-host-ssh"
+    }
+
     chain forward {
         type filter hook forward priority 0; policy drop;
 
         # Allow established/related connections back to VMs
         ct state established,related accept
-
-        # Allow Squid outbound to internet (from host to internet on behalf of VMs)
-        # This is handled by the forward chain allowing Squid's own traffic
     }
 
     chain prerouting {

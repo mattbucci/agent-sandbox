@@ -72,6 +72,11 @@ add_vm_nftables() {
         iifname "${tap_name}" ip daddr "${gateway_ip}" tcp dport "{4317,4318}" accept \
         comment "\"vm${slot}-otel\""
 
+    # BLOCK VM → host SSH (defense in depth — VMs should not reach host SSH)
+    nft add rule ip vm_filter forward \
+        iifname "${tap_name}" ip daddr "${gateway_ip}" tcp dport 22 drop \
+        comment "\"vm${slot}-block-host-ssh\""
+
     # Allow VM → LiteLLM server (direct, bypasses Squid)
     if [[ -n "${llm_host}" ]]; then
         nft add rule ip vm_filter prerouting \
