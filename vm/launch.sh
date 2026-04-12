@@ -30,12 +30,14 @@ shift
 VM_NAME=""
 VCPUS=""
 MEM_MB=""
+NO_AGENT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --name)  VM_NAME="$2"; shift 2 ;;
-        --vcpus) VCPUS="$2"; shift 2 ;;
-        --mem)   MEM_MB="$2"; shift 2 ;;
-        *)       echo "Unknown option: $1"; exit 1 ;;
+        --name)     VM_NAME="$2"; shift 2 ;;
+        --vcpus)    VCPUS="$2"; shift 2 ;;
+        --mem)      MEM_MB="$2"; shift 2 ;;
+        --no-agent) NO_AGENT=1; shift ;;
+        *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
@@ -114,6 +116,7 @@ sed \
     -e "s|__GATEWAY_IP__|${GATEWAY_IP}|g" \
     -e "s|__DNS_IP__|${DNS_IP}|g" \
     -e "s|__HOSTNAME__|${VM_NAME}|g" \
+    -e "s|__NO_AGENT__|${NO_AGENT}|g" \
     -e "s|__LOG_PATH__|${LOG_FILE}|g" \
     -e "s|__METRICS_PATH__|${METRICS_FILE}|g" \
     "${SANDBOX_ROOT}/vm/config-template.json" > "${FC_CONFIG}"

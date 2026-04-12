@@ -11,6 +11,7 @@ parse_cmdline() {
             GATEWAY_IP=*)  GATEWAY_IP="${param#GATEWAY_IP=}" ;;
             DNS_IP=*)      DNS_IP="${param#DNS_IP=}" ;;
             HOSTNAME=*)    VM_HOSTNAME="${param#HOSTNAME=}" ;;
+            NO_AGENT=*)    NO_AGENT="${param#NO_AGENT=}" ;;
         esac
     done
 }
@@ -36,6 +37,7 @@ VM_IP="${VM_IP:-10.0.0.2}"
 GATEWAY_IP="${GATEWAY_IP:-10.0.0.1}"
 DNS_IP="${DNS_IP:-10.0.0.1}"
 VM_HOSTNAME="${VM_HOSTNAME:-agent-vm}"
+NO_AGENT="${NO_AGENT:-0}"
 
 # --- Set hostname ---
 hostname "${VM_HOSTNAME}"
@@ -95,7 +97,9 @@ else
 fi
 
 # --- Start the agent process ---
-if [[ -f /opt/agent/start.sh ]]; then
+if [ "${NO_AGENT}" = "1" ]; then
+    log "NO_AGENT=1 — skipping agent process (desktop-only mode)"
+elif [ -f /opt/agent/start.sh ]; then
     log "Starting agent process..."
     su - agent -c "DISPLAY=:1 /opt/agent/start.sh" &
     AGENT_PID=$!

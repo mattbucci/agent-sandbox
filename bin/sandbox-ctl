@@ -443,7 +443,7 @@ Setup & Build:
   build-all                Build base + all agent rootfs images
 
 VM Management:
-  launch <type> [opts]     Launch a new VM (--name, --vcpus, --mem)
+  launch <type> [opts]     Launch a new VM (--name, --vcpus, --mem, --no-agent)
   stop <id|name|type>      Stop a running VM
   stop-all                 Stop all running VMs
   status [--html]          List VMs with status info
@@ -464,6 +464,8 @@ Examples:
   sudo sandbox-ctl build-all
   sudo sandbox-ctl launch debugger
   sudo sandbox-ctl launch researcher --vcpus 2 --mem 4096
+  sudo sandbox-ctl launch debugger --no-agent   # desktop only, no LLM
+  sudo bin/test-boot.sh                          # boot all 5, test without LLM
   sandbox-ctl status
   sandbox-ctl vnc debugger
   sudo sandbox-ctl stop-all
