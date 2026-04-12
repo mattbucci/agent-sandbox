@@ -101,8 +101,11 @@ METRICS_FILE="${VM_STATE_DIR}/metrics.fifo"
 FC_CONFIG="${VM_STATE_DIR}/vm-config.json"
 FC_SOCKET="${VM_STATE_DIR}/firecracker.sock"
 
-# Create metrics FIFO
-mkfifo "${METRICS_FILE}" 2>/dev/null || true
+# Create log file and metrics FIFO (Firecracker requires these to exist)
+mkdir -p "${LOG_DIR}"
+touch "${LOG_FILE}"
+rm -f "${METRICS_FILE}"
+mkfifo "${METRICS_FILE}"
 
 # Generate config from template
 sed \
