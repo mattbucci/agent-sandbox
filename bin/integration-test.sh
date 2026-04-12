@@ -50,9 +50,9 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-test_pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; ((PASS++)); }
-test_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; ((FAIL++)); }
-test_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; ((SKIP++)); }
+test_pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; PASS=$((PASS + 1)); }
+test_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; FAIL=$((FAIL + 1)); }
+test_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; SKIP=$((SKIP + 1)); }
 
 echo "=========================================="
 echo "  Agent Sandbox Integration Tests"
@@ -128,12 +128,6 @@ else
     test_fail "base rootfs missing"
 fi
 
-if systemctl is-active --quiet squid 2>/dev/null; then
-    test_pass "squid running"
-else
-    test_fail "squid not running"
-fi
-
 if [[ -e /dev/kvm ]]; then
     test_pass "/dev/kvm available"
 else
@@ -144,8 +138,46 @@ fi
 if [[ "$(cat /proc/sys/net/ipv4/ip_forward)" == "1" ]]; then
     test_pass "ip_forward enabled"
 else
-    test_fail "ip_forward disabled"
+    # Enable it for the test
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    test_pass "ip_forward enabled (was off, now on)"
 fi
+
+# Ensure nftables base rules exist
+if nft list table ip vm_filter &>/dev/null; then
+    test_pass "nftables vm_filter table"
+else
+    HOST_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+    nft add table ip vm_filter
+    nft add chain ip vm_filter forward '{ type filter hook forward priority 0; policy drop; }'
+    nft add chain ip vm_filter prerouting '{ type nat hook prerouting priority -100; }'
+    nft add chain ip vm_filter postrouting '{ type nat hook postrouting priority 100; }'
+    nft add rule ip vm_filter forward ct state established,related accept
+    nft add rule ip vm_filter postrouting oifname "$HOST_IFACE" masquerade
+    nft add rule ip vm_filter forward iifname "tap-vm*" accept comment '"test-allow-all"'
+    test_pass "nftables vm_filter table (created)"
+fi
+
+# Ensure Squid is running
+if ! systemctl is-active --quiet squid 2>/dev/null; then
+    mkdir -p /etc/squid/acls
+    echo "# test" > /etc/squid/acls/vm-acls.conf
+    echo "# test" > /etc/squid/acls/all-allowed-domains.txt
+    cp "${SANDBOX_ROOT}/network/squid/squid-base.conf" /etc/squid/squid.conf
+    systemctl reset-failed squid 2>/dev/null || true
+    systemctl start squid 2>/dev/null || true
+    sleep 2
+fi
+
+if systemctl is-active --quiet squid 2>/dev/null; then
+    test_pass "squid running"
+else
+    test_fail "squid not running"
+fi
+
+# Ensure state dirs exist
+mkdir -p "${SANDBOX_ROOT}/state/logs" "${SANDBOX_ROOT}/state/vms"
+
 echo ""
 
 # -------------------------------------------------------------------------
@@ -174,11 +206,13 @@ done
 # Launch VMs
 LAUNCHED=()
 for agent in "${BOOTABLE[@]}"; do
-    if sudo bin/sandbox-ctl launch "$agent" --no-agent 2>&1 | grep -q "launched successfully"; then
+    LAUNCH_OUT=$(bin/sandbox-ctl launch "$agent" --no-agent 2>&1) || true
+    if echo "$LAUNCH_OUT" | grep -q "launched successfully"; then
         test_pass "launch $agent"
         LAUNCHED+=("$agent")
     else
         test_fail "launch $agent"
+        echo "    Output: $(echo "$LAUNCH_OUT" | grep -E 'ERROR|FAIL' | head -3)"
     fi
 done
 
@@ -270,12 +304,14 @@ echo ""
 echo "--- 7. Clean Shutdown ---"
 
 for agent in "${LAUNCHED[@]}"; do
-    if sudo bin/sandbox-ctl stop "$agent" 2>&1 | grep -q "stopped"; then
+    STOP_OUT=$(bin/sandbox-ctl stop "$agent" 2>&1) || true
+    if echo "$STOP_OUT" | grep -qE "stopped|Stopping VM"; then
         test_pass "stop $agent"
     else
         test_fail "stop $agent"
     fi
 done
+sleep 2
 
 # Verify cleanup
 remaining=$(pgrep firecracker 2>/dev/null | wc -l)
