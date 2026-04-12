@@ -127,8 +127,19 @@ apt-get install -y --no-install-recommends \
 
 # Development tools
 apt-get install -y --no-install-recommends \
-    build-essential python3 python3-pip python3-venv python3-dev \
+    build-essential python3 python3-venv python3-dev \
     strace gdb
+
+# Python 3.12 (Ubuntu 22.04 ships 3.10, we want 3.12)
+add-apt-repository -y ppa:deadsnakes/ppa
+apt-get update -qq
+apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev
+update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+
+# uv — fast Python package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+cp /root/.local/bin/uv /usr/local/bin/uv
+cp /root/.local/bin/uvx /usr/local/bin/uvx
 
 # Node.js 22 (for browser automation and other tools)
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -225,15 +236,19 @@ mkdir -p "${STAGING}/opt/agent"
 cp -a "${OVERLAY}/opt/agent/"* "${STAGING}/opt/agent/"
 chmod 755 "${STAGING}/opt/agent/start.sh"
 
-# Install Python dependencies
+# Install Python dependencies via uv
 chroot "${STAGING}" bash -c '
-pip3 install --break-system-packages \
-    deepagents \
+cd /opt/agent
+uv venv --python python3.12 .venv
+uv pip install --python .venv/bin/python \
     langchain langchain-core langchain-openai \
-    playwright requests beautifulsoup4
+    langgraph \
+    requests beautifulsoup4
 
-# Pre-install playwright system deps (not browsers — too large for base)
-python3 -m playwright install-deps chromium 2>/dev/null || true
+# Install deepagents from GitHub (not yet on PyPI)
+uv pip install --python .venv/bin/python \
+    "git+https://github.com/langchain-ai/deepagents.git#subdirectory=libs/deepagents" || \
+    echo "WARNING: deepagents install failed (may need manual install later)"
 '
 
 echo "[5/6] Agent runtime installed."

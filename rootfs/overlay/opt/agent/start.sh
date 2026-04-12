@@ -35,23 +35,18 @@ log "Model: ${LLM_MODEL}"
 mkdir -p /home/agent/workspace /home/agent/tasks
 cd /home/agent/workspace
 
-# Install Python dependencies if not already done
+# Agent virtual environment
 AGENT_DIR="/opt/agent"
-if [[ -f "${AGENT_DIR}/requirements.txt" ]]; then
-    if ! python3 -c "import deepagents" 2>/dev/null; then
-        log "Installing agent runtime dependencies..."
-        pip3 install -r "${AGENT_DIR}/requirements.txt" 2>&1 | tee -a "${LOG}"
-    fi
-fi
+VENV="${AGENT_DIR}/.venv"
+PYTHON="${VENV}/bin/python"
 
-# Install playwright browsers if needed
-if python3 -c "import playwright" 2>/dev/null; then
-    if [[ ! -d /home/agent/.cache/ms-playwright ]]; then
-        log "Installing Playwright browsers..."
-        python3 -m playwright install chromium 2>&1 | tee -a "${LOG}"
-    fi
+# Install Python dependencies if venv doesn't exist
+if [[ ! -f "${PYTHON}" ]]; then
+    log "Creating agent venv with uv..."
+    uv venv --python python3.12 "${VENV}" 2>&1 | tee -a "${LOG}"
+    uv pip install --python "${PYTHON}" -r "${AGENT_DIR}/requirements.txt" 2>&1 | tee -a "${LOG}"
 fi
 
 # Run the agent
 log "Launching DeepAgents runtime..."
-exec python3 "${AGENT_DIR}/agent.py" 2>&1 | tee -a "${LOG}"
+exec "${PYTHON}" "${AGENT_DIR}/agent.py" 2>&1 | tee -a "${LOG}"

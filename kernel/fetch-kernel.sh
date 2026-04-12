@@ -7,9 +7,10 @@ KERNEL_OUT="${SCRIPT_DIR}/vmlinux"
 
 # Firecracker v1.12+ compatible kernel
 # Using the official Firecracker CI kernel builds
-FC_VERSION="v1.12.0"
+# S3 path uses minor version (v1.12), not patch (v1.12.0)
+FC_VERSION="v1.12"
 ARCH="x86_64"
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_VERSION}/${ARCH}/vmlinux-6.1.102"
+KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_VERSION}/${ARCH}/vmlinux-6.1.128"
 
 if [[ -f "${KERNEL_OUT}" ]]; then
     echo "Kernel already exists at ${KERNEL_OUT}"

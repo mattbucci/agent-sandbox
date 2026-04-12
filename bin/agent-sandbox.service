@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent Sandbox - Firecracker VM Manager
+After=network.target squid.service dnsmasq.service
+Wants=squid.service dnsmasq.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/letsrtfm/AI/agent-sandbox/bin/agent-sandbox-boot.sh
+ExecStop=/home/letsrtfm/AI/agent-sandbox/bin/sandbox-ctl stop-all
+
+[Install]
+WantedBy=multi-user.target
