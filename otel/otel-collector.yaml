@@ -1,0 +1,52 @@
+# =============================================================================
+# OpenTelemetry Collector configuration for Agent Sandbox
+#
+# Receives traces from agent VMs via OTLP/HTTP on port 4318
+# Exports to local file + optionally to a remote backend
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+      grpc:
+        endpoint: "0.0.0.0:4317"
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+
+  # Add resource attributes for easier filtering
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: "agent-sandbox"
+        action: upsert
+
+exporters:
+  # Log traces to file for local debugging
+  file/traces:
+    path: /var/log/otel/traces.jsonl
+    rotation:
+      max_megabytes: 100
+      max_days: 7
+      max_backups: 3
+
+  # Console output (useful for initial debugging, disable in production)
+  debug:
+    verbosity: basic
+
+  # Uncomment to forward to a remote backend (Jaeger, Grafana Tempo, etc.)
+  # otlphttp/jaeger:
+  #   endpoint: "http://jaeger:4318"
+  # otlphttp/tempo:
+  #   endpoint: "http://tempo:4318"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [file/traces, debug]

@@ -145,6 +145,10 @@ cp /root/.local/bin/uvx /usr/local/bin/uvx
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
 
+# agent-browser — CLI browser automation for AI agents
+npm install -g agent-browser
+agent-browser install --with-deps 2>/dev/null || true
+
 # Clean up apt cache
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
@@ -243,7 +247,11 @@ uv venv --python python3.12 .venv
 uv pip install --python .venv/bin/python \
     langchain langchain-core langchain-openai \
     langgraph \
-    requests beautifulsoup4
+    requests beautifulsoup4 \
+    opentelemetry-api opentelemetry-sdk \
+    opentelemetry-exporter-otlp \
+    opentelemetry-instrumentation-requests \
+    opentelemetry-instrumentation-httpx
 
 # Install deepagents from GitHub (not yet on PyPI)
 uv pip install --python .venv/bin/python \

@@ -27,6 +27,11 @@ export LLM_API_BASE LLM_API_KEY LLM_MODEL AGENT_TYPE AGENT_NAME
 export OPENAI_API_KEY="${LLM_API_KEY}"
 export OPENAI_API_BASE="${LLM_API_BASE}"
 
+# OTel tracing — collector runs on host (gateway IP)
+GATEWAY_IP=$(ip route | grep default | awk '{print $3}')
+export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://${GATEWAY_IP}:4318}"
+export OTEL_SERVICE_NAME="agent-sandbox-${AGENT_TYPE}"
+
 log "Starting ${AGENT_NAME} (type: ${AGENT_TYPE})"
 log "LLM endpoint: ${LLM_API_BASE}"
 log "Model: ${LLM_MODEL}"

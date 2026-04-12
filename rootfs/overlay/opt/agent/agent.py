@@ -11,6 +11,7 @@ Configuration is read from environment variables (set via /etc/agent.conf):
   LLM_MODEL     - Model name (e.g., deepseek-coder-v2)
   AGENT_TYPE    - Agent specialization (debugger, feature-dev, etc.)
   AGENT_NAME    - Human-readable agent name
+  OTEL_EXPORTER_OTLP_ENDPOINT - OTel collector endpoint (e.g., http://10.0.X.1:4318)
 """
 
 import os
@@ -28,14 +29,103 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agent")
 
+BROWSER_INSTRUCTIONS = """
+## Browser Automation (agent-browser)
+
+You have `agent-browser` installed for web browsing. Use it via bash:
+
+```bash
+# Navigate to a page
+agent-browser open "https://example.com"
+
+# Get interactive elements (returns @ref IDs for targeting)
+agent-browser snapshot -i
+
+# Click, fill, type
+agent-browser click @e1
+agent-browser fill @e2 "search query"
+agent-browser press Enter
+
+# Take a screenshot
+agent-browser screenshot
+
+# Get page text/url/title
+agent-browser get text @e3
+agent-browser get url
+
+# Wait for conditions
+agent-browser wait --text "Success"
+agent-browser wait @e5
+
+# Batch multiple commands (more efficient)
+agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+# Close when done
+agent-browser close
+```
+
+Prefer `agent-browser batch` when running 2+ commands in sequence.
+Use `snapshot -i` to discover interactive elements before clicking/filling.
+"""
+
+
+def init_tracing():
+    """Initialize OpenTelemetry tracing if an endpoint is configured."""
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not otel_endpoint:
+        logger.info("No OTEL_EXPORTER_OTLP_ENDPOINT set, tracing disabled")
+        return
+
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+
+        agent_type = os.environ.get("AGENT_TYPE", "generic")
+        agent_name = os.environ.get("AGENT_NAME", "Agent")
+
+        resource = Resource.create({
+            "service.name": f"agent-sandbox-{agent_type}",
+            "service.instance.id": os.environ.get("HOSTNAME", "unknown"),
+            "agent.type": agent_type,
+            "agent.name": agent_name,
+        })
+
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=f"{otel_endpoint}/v1/traces")
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+
+        # Auto-instrument HTTP clients so LLM calls are traced
+        try:
+            from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+            HTTPXClientInstrumentor().instrument()
+        except Exception:
+            pass
+        try:
+            from opentelemetry.instrumentation.requests import RequestsInstrumentor
+            RequestsInstrumentor().instrument()
+        except Exception:
+            pass
+
+        logger.info(f"OTel tracing enabled → {otel_endpoint}")
+    except Exception as e:
+        logger.warning(f"Failed to initialize OTel tracing: {e}")
+
 
 def load_system_prompt() -> str:
     """Load the agent's system prompt from /etc/agent/system-prompt.md"""
     prompt_path = "/etc/agent/system-prompt.md"
     if os.path.exists(prompt_path):
         with open(prompt_path) as f:
-            return f.read().strip()
-    return f"You are an AI agent of type: {os.environ.get('AGENT_TYPE', 'generic')}."
+            base_prompt = f.read().strip()
+    else:
+        base_prompt = f"You are an AI agent of type: {os.environ.get('AGENT_TYPE', 'generic')}."
+
+    # Append browser instructions to every agent's prompt
+    return base_prompt + "\n\n" + BROWSER_INSTRUCTIONS
 
 
 def create_agent():
@@ -90,13 +180,12 @@ async def run_agent_loop(agent):
                 {"messages": [{"role": "user", "content": initial_task}]}
             )
             logger.info("Initial task completed")
-            # Log the result
             if "messages" in result:
                 for msg in result["messages"]:
                     if hasattr(msg, "content"):
                         logger.info(f"Agent response: {msg.content[:500]}")
 
-    # Interactive loop: read tasks from stdin or a watch directory
+    # Interactive loop: read tasks from a watch directory
     task_dir = "/home/agent/tasks"
     os.makedirs(task_dir, exist_ok=True)
 
@@ -104,7 +193,6 @@ async def run_agent_loop(agent):
     processed = set()
 
     while True:
-        # Check for new task files
         try:
             for fname in sorted(os.listdir(task_dir)):
                 fpath = os.path.join(task_dir, fname)
@@ -141,6 +229,7 @@ async def run_agent_loop(agent):
 
 def main():
     logger.info("Agent sandbox runtime starting...")
+    init_tracing()
     agent = create_agent()
     asyncio.run(run_agent_loop(agent))
 

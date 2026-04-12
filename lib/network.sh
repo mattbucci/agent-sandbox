@@ -67,6 +67,11 @@ add_vm_nftables() {
         iifname "${tap_name}" ip daddr "${gateway_ip}" udp dport 53 accept \
         comment "\"vm${slot}-dns\""
 
+    # Allow VM → host OTel collector (HTTP 4318, gRPC 4317)
+    nft add rule ip vm_filter forward \
+        iifname "${tap_name}" ip daddr "${gateway_ip}" tcp dport "{4317,4318}" accept \
+        comment "\"vm${slot}-otel\""
+
     # Allow VM → LiteLLM server (direct, bypasses Squid)
     if [[ -n "${llm_host}" ]]; then
         nft add rule ip vm_filter prerouting \

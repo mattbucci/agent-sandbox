@@ -3,9 +3,14 @@ deepagents>=0.1.0
 langchain>=1.2.15,<2.0.0
 langchain-core>=1.2.27,<2.0.0
 langchain-openai>=0.3.0,<1.0.0
+langgraph>=1.0.0
 
-# Browser automation
-playwright>=1.50.0
+# OpenTelemetry tracing
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-instrumentation-requests>=0.41b0
+opentelemetry-instrumentation-httpx>=0.41b0
 
 # Utilities
 requests>=2.32.0
