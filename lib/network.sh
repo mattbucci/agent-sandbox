@@ -87,11 +87,9 @@ add_vm_nftables() {
             comment "\"vm${slot}-llm\""
     fi
 
-    # Allow Squid outbound to internet on behalf of VMs
-    # (This is a general rule — Squid's ACLs handle per-VM filtering)
-    nft add rule ip vm_filter forward \
-        oifname "${HOST_IFACE}" ct state new,established accept \
-        comment "\"squid-outbound\"" 2>/dev/null || true
+    # NOTE: Squid runs on the HOST, so its outbound traffic goes through the
+    # OUTPUT chain, not FORWARD. We do NOT need a broad forward accept rule.
+    # The established,related rule in the forward chain handles return traffic.
 }
 
 # Remove nftables rules for a VM
