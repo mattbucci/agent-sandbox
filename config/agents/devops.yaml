@@ -9,6 +9,10 @@ vm:
 egress:
   presets: [github, google, hashicorp, kubernetes, docker-hub, cloud-providers]
 
+github:
+  repos: []  # set to ["myorg/myrepo"] to scope token
+  permissions: [contents:read, actions:write, deployments:write, environments:read]
+
 capabilities:
   presets: [github-cli, kubernetes, docker]
   packages:

@@ -9,6 +9,10 @@ vm:
 egress:
   presets: [github, google, security-databases, npm, pypi]
 
+github:
+  repos: []  # set to ["myorg/myrepo"] to scope token
+  permissions: [contents:read, security_events:read, dependabot_alerts:read]
+
 capabilities:
   presets: [security-scanning, github-cli, python-dev]
 

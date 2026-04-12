@@ -154,6 +154,32 @@ Add domains not covered by presets with `egress.domains`.
 
 The LiteLLM server is always allowed (configured in `sandbox.yaml`).
 
+## GitHub Token Configuration
+
+Agents that need GitHub access use **fine-grained personal access tokens** scoped to specific repos and permissions. Classic tokens and SSH keys are rejected.
+
+```yaml
+github:
+  repos: ["myorg/myrepo", "myorg/infra"]
+  permissions: [contents:write, issues:read, pull_requests:write]
+```
+
+Set up tokens:
+
+```bash
+bin/setup-github-tokens.sh show       # see what each agent needs
+bin/setup-github-tokens.sh            # interactive setup
+bin/setup-github-tokens.sh validate   # check all tokens
+```
+
+Tokens are stored in `config/secrets/github-tokens/<agent>.token` (gitignored) and injected into VMs at boot as `GITHUB_TOKEN`.
+
+**Security rules enforced:**
+- Only fine-grained tokens accepted (`github_pat_*`)
+- Classic tokens **rejected** (`ghp_*`) — unscoped, access to ALL repos
+- SSH keys **rejected** — unscoped, full push to ALL repos
+- OAuth tokens **rejected** (`gho_*`) — may have broad org permissions
+
 ## Capability Presets
 
 Install tools and packages into the agent's VM:

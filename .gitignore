@@ -12,6 +12,7 @@ build/
 # Secrets
 config/sandbox.yaml
 config/sandbox.conf
+config/secrets/
 
 # OS
 .DS_Store

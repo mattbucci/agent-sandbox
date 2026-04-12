@@ -242,6 +242,7 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
     vm = agent.get("vm", {})
     llm = global_config.get("llm", {})
     defaults = global_config.get("vm_defaults", {})
+    github = agent.get("github", {})
 
     lines = [
         f"# Auto-generated agent.conf for {agent_info.get('type', 'unknown')}",
@@ -251,6 +252,24 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
         f'VCPUS="{vm.get("vcpus", defaults.get("vcpus", 4))}"',
         f'MEM_MB="{vm.get("mem_mb", defaults.get("mem_mb", 8192))}"',
     ]
+
+    # GitHub token injection — read from secrets file if it exists
+    agent_type = agent_info.get("type", "generic")
+    token_file = SANDBOX_ROOT / "config" / "secrets" / "github-tokens" / f"{agent_type}.token"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            lines.append(f'GITHUB_TOKEN="{token}"')
+
+    # GitHub config from YAML
+    if github:
+        repos = github.get("repos", [])
+        if repos:
+            lines.append(f'GITHUB_REPOS="{" ".join(repos)}"')
+        perms = github.get("permissions", [])
+        if perms:
+            lines.append(f'GITHUB_PERMISSIONS="{" ".join(perms)}"')
+
     return "\n".join(lines) + "\n"
 
 

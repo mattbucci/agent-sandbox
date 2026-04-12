@@ -11,6 +11,11 @@ egress:
   domains:
     - deb.nodesource.com
 
+# GitHub fine-grained token config (token stored in config/secrets/github-tokens/)
+github:
+  repos: []  # set to ["myorg/myrepo"] to scope token
+  permissions: [contents:write, issues:read, pull_requests:write, workflows:read]
+
 capabilities:
   presets: [github-cli, node-dev, python-dev, docker]
   packages:

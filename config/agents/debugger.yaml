@@ -11,6 +11,10 @@ egress:
   domains:
     - .sentry.io
 
+github:
+  repos: []  # set to ["myorg/myrepo"] to scope token
+  permissions: [contents:read, issues:read, pull_requests:read]
+
 capabilities:
   presets: [debugging, python-dev]
   packages:
