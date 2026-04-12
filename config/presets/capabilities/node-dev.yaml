@@ -1,0 +1,14 @@
+name: node-dev
+description: "Node.js development and code quality tools"
+packages:
+  npm:
+    - typescript
+    - eslint
+    - prettier
+provides_tools:
+  - name: typescript
+    description: "TypeScript compiler and type checker"
+  - name: eslint
+    description: "JavaScript and TypeScript linter"
+  - name: prettier
+    description: "Opinionated code formatter"

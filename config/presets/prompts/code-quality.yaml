@@ -1,0 +1,63 @@
+name: code-quality
+description: "Code style consistency, linting, testing, and cleanliness standards"
+rules:
+  - id: CQ-001
+    rule: "Follow the existing code style of the project. Match indentation, naming conventions, import ordering, and patterns already in use."
+    example: |
+      # GOOD [CQ-001]:
+      # Existing code uses snake_case and 4-space indent:
+      def get_user_by_id(user_id: int) -> User:
+          return db.query(User).filter_by(id=user_id).first()
+
+      # Your new code matches:
+      def get_user_by_email(email: str) -> User:
+          return db.query(User).filter_by(email=email).first()
+
+      # BAD [CQ-001]:
+      # Existing code uses snake_case, but you write camelCase:
+      def getUserByEmail(email: str) -> User:
+        return db.query(User).filter_by(email=email).first()
+
+  - id: CQ-002
+    rule: "Run the project's linter and formatter before committing. Fix all warnings and errors."
+    example: |
+      # GOOD [CQ-002]:
+      ruff check --fix src/
+      ruff format src/
+      # or for JS/TS projects:
+      npx eslint --fix src/
+      npx prettier --write src/
+      # Then commit only after clean output.
+
+      # BAD [CQ-002]:
+      git add -A && git commit -m "add feature"
+      # Committed without running linters — CI fails with 12 warnings.
+
+  - id: CQ-003
+    rule: "Run the test suite after making changes. All existing tests must pass before committing."
+    example: |
+      # GOOD [CQ-003]:
+      pytest tests/ -q
+      # 47 passed, 0 failed — safe to commit.
+
+      # BAD [CQ-003]:
+      # "I only changed one line, no need to run tests."
+      # That one line broke 8 tests downstream.
+
+  - id: CQ-004
+    rule: "Never commit commented-out code. Remove dead code. Use version control to recover old code if needed."
+    example: |
+      # GOOD [CQ-004]:
+      def process(data):
+          validated = validate(data)
+          return transform(validated)
+
+      # BAD [CQ-004]:
+      def process(data):
+          # old_result = legacy_transform(data)
+          # if USE_V2:
+          #     result = new_transform(data)
+          # else:
+          #     result = old_result
+          validated = validate(data)
+          return transform(validated)

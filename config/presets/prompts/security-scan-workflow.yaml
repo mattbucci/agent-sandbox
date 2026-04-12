@@ -1,0 +1,79 @@
+name: security-scan-workflow
+description: "Multi-tool security scanning workflow with severity-based reporting"
+rules:
+  - id: SEC-001
+    rule: "Start every security scan with trivy fs . for a broad filesystem scan covering OS packages, language deps, and IaC misconfigs."
+    example: |
+      # GOOD [SEC-001]:
+      trivy fs . --severity HIGH,CRITICAL --format table
+      # Then drill into specific findings.
+
+      # BAD [SEC-001]:
+      # Jumping straight to manual code review without running any scanner.
+      grep -r "password" src/
+
+  - id: SEC-002
+    rule: "Run language-specific audit tools after the broad scan: pip-audit for Python, npm audit for Node.js, cargo audit for Rust."
+    example: |
+      # GOOD [SEC-002]:
+      # Python project:
+      pip-audit --strict --desc
+
+      # Node.js project:
+      npm audit --audit-level=moderate
+
+      # Rust project:
+      cargo audit
+
+      # BAD [SEC-002]:
+      # Only running trivy and assuming it catches everything.
+      # Language-specific tools have deeper dependency analysis.
+
+  - id: SEC-003
+    rule: "Check that dependency versions are pinned (exact versions or lock files). Flag any unpinned or floating version specifiers."
+    example: |
+      # GOOD [SEC-003]:
+      # requirements.txt with pinned versions:
+      # requests==2.31.0
+      # flask==3.0.2
+      #
+      # Verify lock file exists:
+      ls package-lock.json poetry.lock Pipfile.lock Cargo.lock 2>/dev/null
+
+      # BAD [SEC-003]:
+      # requirements.txt with floating versions:
+      # requests>=2.0
+      # flask
+      # — any future install could pull a compromised version.
+
+  - id: SEC-004
+    rule: "Cross-reference findings with the NIST NVD or GitHub Advisory Database for confirmed CVE details, CVSS scores, and known exploits."
+    example: |
+      # GOOD [SEC-004]:
+      # trivy found CVE-2024-12345 in openssl 3.1.0.
+      # Cross-reference:
+      curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2024-12345" | jq '.vulnerabilities[0].cve.metrics'
+      # Confirmed CVSS 9.8 with public exploit — critical priority.
+
+      # BAD [SEC-004]:
+      # Reporting a CVE without checking if it actually affects
+      # our usage or what the real severity is.
+
+  - id: SEC-005
+    rule: "Produce a final security report with columns: Severity, CVE ID, Package, Current Version, Fixed Version, and Remediation action."
+    example: |
+      # GOOD [SEC-005]:
+      # ## Security Scan Report — 2026-04-12
+      #
+      # | Severity | CVE             | Package  | Current | Fixed  | Remediation         |
+      # |----------|-----------------|----------|---------|--------|---------------------|
+      # | CRITICAL | CVE-2024-12345  | openssl  | 3.1.0   | 3.1.5  | Upgrade immediately |
+      # | HIGH     | CVE-2024-67890  | lodash   | 4.17.19 | 4.17.21| Upgrade in sprint   |
+      # | MEDIUM   | CVE-2024-11111  | pillow   | 9.4.0   | 9.5.0  | Schedule upgrade    |
+      #
+      # ### Summary
+      # 1 critical, 1 high, 1 medium vulnerability found.
+      # Immediate action required for openssl CVE-2024-12345.
+
+      # BAD [SEC-005]:
+      # "Found some vulnerabilities, see trivy output."

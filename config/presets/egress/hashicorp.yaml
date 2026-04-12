@@ -1,0 +1,6 @@
+name: hashicorp
+description: "HashiCorp releases, repos, and Terraform registry"
+domains:
+  - releases.hashicorp.com
+  - apt.releases.hashicorp.com
+  - registry.terraform.io

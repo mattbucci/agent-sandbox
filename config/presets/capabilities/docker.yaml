@@ -1,0 +1,8 @@
+name: docker
+description: "Container management and runtime"
+packages:
+  apt:
+    - docker.io
+provides_tools:
+  - name: docker
+    description: "Container management CLI"

@@ -1,0 +1,6 @@
+name: kubernetes
+description: "Kubernetes and Helm package repositories"
+domains:
+  - .kubernetes.io
+  - pkgs.k8s.io
+  - .helm.sh

@@ -1,0 +1,6 @@
+name: cloud-providers
+description: "Major cloud provider APIs and services"
+domains:
+  - .amazonaws.com
+  - .cloud.google.com
+  - .azure.com

@@ -1,0 +1,6 @@
+name: github
+description: "GitHub repositories, APIs, and raw content"
+domains:
+  - .github.com
+  - .githubusercontent.com
+  - raw.githubusercontent.com

@@ -1,0 +1,56 @@
+name: research-sweep
+description: "Multi-source research workflow with source tracking and relevance assessment"
+rules:
+  - id: RES-001
+    rule: "Check multiple independent sources for any claim. Do not rely on a single source for facts, benchmarks, or recommendations."
+    example: |
+      # GOOD [RES-001]:
+      # Researching "best Python web framework for async":
+      # 1. Official docs for FastAPI, Starlette, Sanic
+      # 2. TechEmpower benchmarks (techempower.com/benchmarks)
+      # 3. GitHub stars/issues/release cadence for each
+      # 4. Recent blog posts or conference talks (2025-2026)
+      # Cross-reference claims across sources before concluding.
+
+      # BAD [RES-001]:
+      # Reading one Medium article titled "Why X is the best"
+      # and reporting its claims as established fact.
+
+  - id: RES-002
+    rule: "Extract key facts, data points, and conclusions. Do not copy full articles or large text blocks."
+    example: |
+      # GOOD [RES-002]:
+      # From TechEmpower Round 22:
+      # - FastAPI: 48,000 req/s (JSON serialization)
+      # - Sanic: 41,200 req/s (JSON serialization)
+      # - Flask (sync): 12,800 req/s (JSON serialization)
+      # Key takeaway: FastAPI leads by ~16% over Sanic in this benchmark.
+
+      # BAD [RES-002]:
+      # Pasting three paragraphs of marketing copy from the FastAPI homepage.
+
+  - id: RES-003
+    rule: "Include source URLs and access dates for every fact cited. Sources without dates are unreliable."
+    example: |
+      # GOOD [RES-003]:
+      # - FastAPI benchmark data: https://techempower.com/benchmarks/#r22 (accessed 2026-04-12)
+      # - CVE details: https://nvd.nist.gov/vuln/detail/CVE-2025-1234 (accessed 2026-04-12)
+      # - Release notes: https://github.com/tiangolo/fastapi/releases/tag/0.115.0 (2025-11-01)
+
+      # BAD [RES-003]:
+      # "According to some benchmarks, FastAPI is faster."
+      # No URL, no date, no way to verify.
+
+  - id: RES-004
+    rule: "For each source, summarize its relevance to the current task. Explain why the information matters for our decision."
+    example: |
+      # GOOD [RES-004]:
+      # Source: TechEmpower Round 22 benchmarks
+      # Relevance: Our API gateway handles ~30k req/s at peak. FastAPI's
+      # 48k req/s ceiling gives us headroom. Sanic would also work but
+      # has a smaller ecosystem for middleware plugins we need (OAuth, CORS).
+      # This confirms FastAPI as the stronger candidate for our use case.
+
+      # BAD [RES-004]:
+      # Listing 15 sources with no explanation of how they relate
+      # to the actual question we are trying to answer.

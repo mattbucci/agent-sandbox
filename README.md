@@ -2,18 +2,18 @@
 
 Firecracker microVM platform for running isolated AI agents with full Ubuntu XFCE desktops, Chromium, and per-VM domain-based egress filtering.
 
-Each agent runs inside its own hardware-isolated VM (KVM) — not a container. The host controls what domains each agent can reach via Squid SNI-based HTTPS filtering + nftables.
+Each agent runs inside its own hardware-isolated VM (KVM) — not a container. Agents are defined in a single YAML file with composable presets for egress domains, capabilities, and prompt rulebooks.
 
 ## Architecture
 
 ```
 Host (sandbox-ctl CLI)
-├── Firecracker + Jailer (KVM-based VM isolation)
+├── Firecracker (KVM-based VM isolation)
 ├── Squid (SNI peek-and-splice HTTPS domain filtering, no MITM)
 ├── nftables (force all VM traffic through Squid, block direct egress)
 ├── dnsmasq (DNS for VM subnets)
+├── otel-collector (trace aggregation from all agents)
 ├── noVNC + websockify (observe agent desktops in browser)
-├── systemd service (auto-restore VMs on reboot)
 │
 │  LiteLLM / sglang (remote, OpenAI-compatible API)
 │       ↕
@@ -24,125 +24,185 @@ Host (sandbox-ctl CLI)
 └── VM 4: security       10.0.4.2  noVNC :6084
 ```
 
-### Inside Each VM
+Inside each VM: Ubuntu 22.04 + XFCE + Chromium + Python 3.12 + uv + agent-browser + DeepAgents (LangGraph) + SSH + VNC.
 
+See [docs/architecture.md](docs/architecture.md) for the full system design.
+
+## Agents
+
+Agents are defined in `config/agents/*.yaml`. Each YAML is self-contained — it declares the agent's egress domains, installed tools, and system prompt using composable presets:
+
+```yaml
+# config/agents/debugger.yaml
+agent:
+  type: debugger
+  name: "Sentry Bug Investigator"
+
+egress:
+  presets: [github, google, stackoverflow]
+  domains: [.sentry.io]
+
+capabilities:
+  presets: [debugging, python-dev]
+  install_scripts: [sentry-cli.sh]
+
+prompt:
+  role: |
+    You are a senior debugging specialist...
+  presets: [debugging-workflow, git-workflow, code-execution, browser-instructions, report-output]
 ```
-Ubuntu 22.04 + XFCE + Chromium
-├── Python 3.12 + uv (fast package manager)
-├── DeepAgents runtime (LangGraph-based)
-│   ├── Connects to LiteLLM via OpenAI-compatible API
-│   ├── System prompt defines agent specialization
-│   └── LocalShellBackend → real bash execution (VM is the sandbox)
-├── Agent-specific CLI tools
-└── SSH + VNC (for observation/debugging)
+
+**Built-in agents:** debugger, feature-dev, devops, researcher, security
+
+```bash
+sandbox-ctl list-agents              # show all agents
+sandbox-ctl config list-presets      # show available presets
+sandbox-ctl config validate <type>   # validate an agent YAML
 ```
 
-## 5 Agent Specializations
-
-| Agent | Role | Key Tools | Allowed Domains |
-|-------|------|-----------|-----------------|
-| **debugger** | Investigates bugs from Sentry traces, reproduces and diagnoses | sentry-cli, gdb, strace | sentry.io, github.com, stackoverflow.com |
-| **feature-dev** | Picks up GitHub issues, builds features, creates PRs | gh CLI, build-essential, docker | github.com, npmjs.org, pypi.org |
-| **devops** | Ships code, manages feature flags, deploys and rolls back | terraform, kubectl, ansible, helm | github.com, registry.terraform.io, cloud APIs |
-| **researcher** | Monitors HN, GitHub, Reddit, arxiv for trends | chromium, readability-cli, pandoc | news.ycombinator.com, github.com, arxiv.org |
-| **security** | CVE monitoring, dependency auditing, pentesting | trivy, grype, semgrep, nmap | nvd.nist.gov, github.com, cve.org |
+See [docs/creating-agents.md](docs/creating-agents.md) for a full guide on creating custom agents.
 
 ## Quick Start
 
 ```bash
 # 1. Configure your LLM endpoint
-cp config/sandbox.conf.example config/sandbox.conf
-vim config/sandbox.conf   # Set LLM_API_BASE, LLM_API_KEY, LLM_MODEL, HOST_IFACE
+cp config/sandbox.yaml.example config/sandbox.yaml
+vim config/sandbox.yaml   # set llm.api_base, llm.api_key, network.host_iface
 
-# 2. Full setup (installs Firecracker, kernel, Squid, dnsmasq, noVNC, nftables)
+# 2. Full setup (Firecracker, kernel, Squid, dnsmasq, noVNC, OTel, nftables)
 sudo bin/sandbox-ctl setup
 
 # 3. Build rootfs images
-sudo bin/sandbox-ctl build-base      # ~15 min: Ubuntu + XFCE + Chrome + Python 3.12 + uv
-sudo bin/sandbox-ctl build-all       # ~5 min each: per-agent tool customization
+sudo bin/sandbox-ctl build-base      # ~15 min: Ubuntu + XFCE + Chrome + Python 3.12
+sudo bin/sandbox-ctl build-all       # ~5 min each: per-agent customization
 
 # 4. Launch agents
 sudo bin/sandbox-ctl launch debugger
 sudo bin/sandbox-ctl launch researcher
 
-# 5. Observe agent desktops
+# 5. Observe
 bin/sandbox-ctl vnc debugger         # prints noVNC URL
 bin/sandbox-ctl status               # list all VMs
 
-# 6. Launch without an LLM (desktop-only, for testing)
+# 6. Test without LLM (desktop-only mode)
 sudo bin/sandbox-ctl launch debugger --no-agent
 ```
 
-## Network Egress Filtering
+## Configuration System
 
-Each VM's outbound traffic is filtered by domain:
+All configuration is YAML-based with composable presets:
+
+```
+config/
+  sandbox.yaml                  # global: LLM endpoint, network, VM defaults
+  agents/*.yaml                 # one per agent type
+  presets/
+    egress/*.yaml               # domain allowlist groups (github, npm, pypi, ...)
+    capabilities/*.yaml         # tool/package groups (python-dev, debugging, ...)
+    prompts/*.yaml              # rulebook presets (git-workflow, code-execution, ...)
+  install-scripts/*.sh          # complex tool installers (terraform, trivy, ...)
+```
+
+The `agentconf.py` compiler resolves presets and outputs flat files for the bash scripts:
+
+```bash
+sandbox-ctl config compile debugger   # compile one agent
+sandbox-ctl config compile            # compile all
+cat build/debugger/system-prompt.md   # inspect compiled prompt
+cat build/debugger/allowlist.txt      # inspect compiled domain list
+```
+
+### Prompt Rulebooks
+
+Prompt presets use a rulebook format with IDs, rules, and examples:
+
+```yaml
+rules:
+  - id: GIT-001
+    rule: "Always create feature branches — never commit directly to main"
+    example: |
+      # GOOD [GIT-001]: git checkout -b fix/null-pointer
+      # BAD [GIT-001]:  git commit -am "fix" on main
+```
+
+Agents reference rule IDs in their reasoning, making behavior auditable in OTel traces.
+
+## Network Egress Filtering
 
 1. **nftables** intercepts all TCP 80/443 from VM TAP devices
 2. Traffic is redirected (DNAT) to **Squid** on the host
 3. Squid uses **peek-and-splice** to read the TLS SNI field
 4. If the domain is in the VM's allowlist → **splice** (pass through, no decryption)
 5. If not → **terminate** (connection blocked)
-6. The LiteLLM server is always allowed for all VMs
 
-Per-VM domain allowlists live in `rootfs/agents/<type>/allowlist.txt`.
+Domain allowlists are composed from egress presets + per-agent inline domains.
+
+## Observability
+
+- **OTel traces** — every LLM API call is traced with agent type, model, and timing. Collector at `:4318`, traces to `/var/log/otel/traces.jsonl`.
+- **noVNC** — watch agent desktops in your browser. `sandbox-ctl vnc <agent>`
+- **Serial console** — `sandbox-ctl logs <agent>`
+- **SSH** — `sandbox-ctl ssh <agent>` (password: `agent`)
 
 ## Boot Persistence
 
-A systemd service (`agent-sandbox.service`) auto-restores all VMs on host reboot:
-- Recreates TAP devices and nftables rules
-- Restarts Squid and dnsmasq
-- Relaunches each VM from its saved state
+A systemd service auto-restores all VMs on host reboot:
 
 ```bash
-# Installed automatically by sandbox-ctl setup
-sudo systemctl enable agent-sandbox.service
+sudo systemctl enable agent-sandbox.service  # installed by setup
 ```
 
 ## CLI Reference
 
 ```
-sandbox-ctl setup              # One-time: install all deps, configure host
-sandbox-ctl build-base         # Build base Ubuntu+XFCE rootfs
-sandbox-ctl build-agent TYPE   # Build agent-specific rootfs
-sandbox-ctl build-all          # Build all rootfs images
+Setup & Build:
+  setup                          Install deps, kernel, network, OTel
+  build-base                     Build base Ubuntu+XFCE rootfs
+  build-agent <type>             Build agent-specific rootfs
+  build-all                      Build all rootfs images
 
-sandbox-ctl launch TYPE [--name N] [--vcpus N] [--mem MB] [--no-agent]
-sandbox-ctl stop ID|NAME|TYPE
-sandbox-ctl stop-all
-sandbox-ctl status [--html]
-sandbox-ctl cleanup            # Remove stopped VM state
+VM Management:
+  launch <type> [--name N] [--vcpus N] [--mem MB] [--no-agent]
+  stop <id|name|type>
+  stop-all
+  status [--html]
+  cleanup                        Remove stopped VM state
 
-sandbox-ctl vnc ID|NAME|TYPE   # Print noVNC URL
-sandbox-ctl logs ID|NAME|TYPE  # Tail serial console
-sandbox-ctl ssh ID|NAME|TYPE   # SSH in (password: agent)
-sandbox-ctl list-agents        # Show available agent types
-sandbox-ctl network-status     # Show TAP devices, nftables, Squid
+Config:
+  config compile [type]          Compile agent YAML → build/
+  config validate <type>         Validate an agent YAML
+  config list-presets [category] List available presets
+  config docs                    Generate docs/presets-reference.md
+
+Access:
+  vnc <id|name|type>             Print noVNC URL
+  logs <id|name|type>            Tail serial console
+  ssh <id|name|type>             SSH into VM
+
+Info:
+  list-agents                    Show available agent types
+  network-status                 Show TAP, nftables, Squid status
 ```
 
-## Resource Allocation
+## Resources
 
-Default per VM: 4 vCPUs, 8GB RAM. Configurable per-agent in `config/agents/<type>.conf` or at launch with `--vcpus` and `--mem`.
+Default per VM: 4 vCPUs, 8GB RAM. Override per-agent in YAML or at launch.
 
-| | Per VM | 5 VMs | Host Reserved |
+| | Per VM | 5 VMs | Host |
 |---|---|---|---|
-| vCPUs | 4 | 20 | 4 |
-| RAM | 8GB | 40GB | ~20GB |
+| vCPUs | 4 | 20 | 4 reserved |
+| RAM | 8GB | 40GB | ~20GB free |
 | Disk | 8GB sparse | ~12GB actual | - |
-| noVNC | 6080+N | 5 ports | - |
 
 ## Requirements
 
 - Linux x86_64 with KVM (`/dev/kvm`)
 - ~60GB RAM for 5 VMs (configurable)
 - Root access for Firecracker, TAP devices, nftables
+- Python 3 + PyYAML on host (for config compiler)
 
-## Key Design Decisions
+## Documentation
 
-- **Firecracker, not Docker**: True hardware isolation via KVM. Each VM has its own kernel.
-- **Custom init, not systemd**: Shell-script PID 1 — Firecracker doesn't support full systemd.
-- **DeepAgents (LangGraph)**: Agent runtime with `LocalShellBackend`. Real bash execution since the VM is the sandbox.
-- **uv + Python 3.12**: Fast, reproducible Python environment inside each VM.
-- **LiteLLM (OpenAI-compatible)**: Configurable API base URL, key, model per agent. Works with sglang, vLLM, Ollama, etc.
-- **Squid peek-and-splice**: HTTPS domain filtering by SNI without MITM decryption.
-- **Per-VM /24 subnets**: No VM-to-VM communication possible.
-- **COW rootfs clones**: Fast VM launch from pre-built agent images.
+- [Creating Custom Agents](docs/creating-agents.md) — step-by-step guide
+- [Presets Reference](docs/presets-reference.md) — all available presets
+- [Architecture](docs/architecture.md) — system design and data flow

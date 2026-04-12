@@ -18,9 +18,8 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 # --- Slot allocation ---
 # Slots are 0-254. A slot is "taken" if state/vms/*/info.json references it.
 
-SLOTS_FILE="${STATE_DIR}/.slots"
-
 allocate_slot() {
+    local SLOTS_FILE="${STATE_DIR}/.slots"
     mkdir -p "${STATE_DIR}"
     touch "${SLOTS_FILE}"
 
@@ -63,16 +62,49 @@ release_slot() {
 
 # --- Agent type validation ---
 list_agent_types() {
-    ls "${SANDBOX_ROOT}/config/agents/" 2>/dev/null | sed 's/.conf$//' | sort
+    ls "${SANDBOX_ROOT}/config/agents/" 2>/dev/null | sed 's/.yaml$//' | sort
 }
 
 validate_agent_type() {
     local agent_type="$1"
-    if [[ ! -f "${SANDBOX_ROOT}/config/agents/${agent_type}.conf" ]]; then
+    if [[ ! -f "${SANDBOX_ROOT}/config/agents/${agent_type}.yaml" ]]; then
         log_error "Unknown agent type: ${agent_type}"
         echo "Available types:"
         list_agent_types | sed 's/^/  /'
         return 1
+    fi
+}
+
+# Ensure agent is compiled (call agentconf.py compile if build/ is stale)
+ensure_compiled() {
+    local agent_type="$1"
+    local build_dir="${SANDBOX_ROOT}/build/${agent_type}"
+    local agent_yaml="${SANDBOX_ROOT}/config/agents/${agent_type}.yaml"
+
+    # Recompile if build dir missing or YAML is newer
+    if [[ ! -d "${build_dir}" ]] || [[ "${agent_yaml}" -nt "${build_dir}/agent.conf" ]]; then
+        log_info "Compiling agent config: ${agent_type}"
+        python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile "${agent_type}"
+    fi
+}
+
+ensure_global_compiled() {
+    local build_conf="${SANDBOX_ROOT}/build/sandbox.conf"
+    local global_yaml="${SANDBOX_ROOT}/config/sandbox.yaml"
+
+    if [[ -f "${global_yaml}" ]]; then
+        if [[ ! -f "${build_conf}" ]] || [[ "${global_yaml}" -nt "${build_conf}" ]]; then
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile-global 2>/dev/null
+        fi
+    fi
+
+    # Source the compiled config if it exists, otherwise set defaults
+    if [[ -f "${build_conf}" ]]; then
+        source "${build_conf}"
+    else
+        # Minimal defaults so scripts don't crash during bootstrap
+        STATE_DIR="${SANDBOX_ROOT}/state"
+        LOG_DIR="${SANDBOX_ROOT}/state/logs"
     fi
 }
 

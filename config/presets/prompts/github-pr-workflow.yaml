@@ -1,0 +1,87 @@
+name: github-pr-workflow
+description: "Issue-driven pull request workflow using the gh CLI"
+rules:
+  - id: PR-001
+    rule: "Read the full issue (including comments) before starting work. Understand acceptance criteria and prior discussion."
+    example: |
+      # GOOD [PR-001]:
+      gh issue view 42 --comments
+      # Read through all comments and linked issues before writing code.
+
+      # BAD [PR-001]:
+      # Glancing at the issue title "fix auth" and immediately coding
+      # a solution that misses the nuance discussed in comments.
+
+  - id: PR-002
+    rule: "One feature or fix per pull request. Do not bundle unrelated changes."
+    example: |
+      # GOOD [PR-002]:
+      git checkout -b fix/rate-limiter-bypass
+      # Only changes related to the rate limiter bug.
+      gh pr create --title "Fix rate limiter bypass on /api/upload" ...
+
+      # BAD [PR-002]:
+      # PR titled "Fix rate limiter and update docs and refactor logging"
+      # — three unrelated changes that should be separate PRs.
+
+  - id: PR-003
+    rule: "Link the PR to its issue using 'Closes #N' or 'Fixes #N' in the PR body so the issue auto-closes on merge."
+    example: |
+      # GOOD [PR-003]:
+      gh pr create --title "Fix rate limiter bypass" --body "$(cat <<'EOF'
+      ## Summary
+      Fixes the bypass discovered in #42 by validating tokens before
+      checking the rate limit bucket.
+
+      Closes #42
+      EOF
+      )"
+
+      # BAD [PR-003]:
+      gh pr create --title "Fix rate limiter bypass" --body "Fixed the bug."
+      # No issue link — reviewer has no context, issue stays open.
+
+  - id: PR-004
+    rule: "Include test coverage for the change. If tests cannot be added, explain why in the PR body."
+    example: |
+      # GOOD [PR-004]:
+      # PR includes new test file or updated test cases.
+      gh pr create --title "Add retry logic for S3 uploads" --body "$(cat <<'EOF'
+      ## Summary
+      Adds exponential backoff retry for transient S3 failures.
+
+      ## Test plan
+      - Added unit tests in tests/test_s3_retry.py
+      - Tested manually against LocalStack with simulated 503s
+
+      Closes #55
+      EOF
+      )"
+
+      # BAD [PR-004]:
+      # PR changes production code with zero test changes and no explanation.
+
+  - id: PR-005
+    rule: "Write a descriptive PR title (under 70 chars) and body with Summary, Test Plan, and any breaking changes."
+    example: |
+      # GOOD [PR-005]:
+      gh pr create \
+        --title "Fix token refresh race condition in auth middleware" \
+        --body "$(cat <<'EOF'
+      ## Summary
+      - Tokens were being refreshed concurrently, causing 401 bursts
+      - Added a mutex around the refresh path
+
+      ## Test plan
+      - [x] Unit test for concurrent refresh attempts
+      - [x] Integration test with expired token scenario
+
+      ## Breaking changes
+      None
+
+      Closes #78
+      EOF
+      )"
+
+      # BAD [PR-005]:
+      gh pr create --title "fix stuff" --body ""

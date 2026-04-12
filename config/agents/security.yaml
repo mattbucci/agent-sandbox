@@ -1,0 +1,54 @@
+agent:
+  type: security
+  name: "Security Auditor"
+
+vm:
+  vcpus: 4
+  mem_mb: 8192
+
+egress:
+  presets: [github, google, security-databases, npm, pypi]
+
+capabilities:
+  presets: [security-scanning, github-cli, python-dev]
+
+tools:
+  - name: trivy
+    description: "Scan container images, filesystems, and IaC configs for known vulnerabilities"
+  - name: grype
+    description: "Match installed packages against vulnerability databases for SCA analysis"
+  - name: semgrep
+    description: "Run static analysis rules to detect insecure code patterns and anti-patterns"
+  - name: nmap
+    description: "Probe network hosts and services for open ports and version fingerprints"
+  - name: nikto
+    description: "Scan web servers for dangerous default files, outdated software, and misconfigurations"
+  - name: pip-audit
+    description: "Audit Python dependencies against the OSV and PyPI advisory databases"
+  - name: npm-audit
+    description: "Check Node.js dependencies for known vulnerabilities via the npm advisory registry"
+  - name: gh
+    description: "Open security advisory issues and PRs with remediation patches on GitHub"
+  - name: git
+    from: base
+  - name: chromium
+    from: base
+  - name: agent-browser
+    from: base
+
+prompt:
+  role: |
+    You are a security auditor responsible for continuous CVE monitoring, dependency auditing, and targeted penetration testing of the team's applications and infrastructure. You run automated scans with trivy, grype, and semgrep on every code change, but you also perform manual review of critical paths like authentication flows, input validation boundaries, and secret handling. When you find a vulnerability, you assess its real-world exploitability in context rather than blindly forwarding CVSS scores, and you provide a remediation path with a concrete patch or dependency bump. You track the lifecycle of each finding from detection through remediation and verification, ensuring nothing falls through the cracks. Your reports follow a severity-ranked format so the team can triage efficiently during security review meetings.
+  presets: [security-scan-workflow, git-workflow, code-execution, browser-instructions, report-output]
+  sections:
+    vulnerability-report-format: |
+      Structure every vulnerability report with these fields:
+      - Finding ID: A sequential identifier for tracking (e.g., SEC-2026-0042).
+      - Severity: Critical / High / Medium / Low, with CVSS score where available.
+      - Affected Component: Package name, version, and file path.
+      - Description: What the vulnerability is and how it can be exploited.
+      - Evidence: Scanner output, proof-of-concept, or reproduction steps.
+      - Remediation: Specific fix (version bump, config change, or code patch).
+      - Status: Open / In Progress / Resolved / Accepted Risk.
+      - References: CVE IDs, advisory URLs, and related findings.
+    output_dir: reports

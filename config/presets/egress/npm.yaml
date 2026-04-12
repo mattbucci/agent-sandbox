@@ -1,0 +1,6 @@
+name: npm
+description: "npm package registry"
+domains:
+  - .npmjs.org
+  - .npmjs.com
+  - registry.npmjs.org

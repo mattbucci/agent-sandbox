@@ -1,0 +1,6 @@
+name: google
+description: "Google services and APIs"
+domains:
+  - .google.com
+  - .googleapis.com
+  - scholar.google.com

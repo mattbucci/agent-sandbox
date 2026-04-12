@@ -7,8 +7,10 @@ kernel/vmlinux
 rootfs/base.ext4
 rootfs/staging/
 rootfs/agents/*/rootfs.ext4
+build/
 
 # Secrets
+config/sandbox.yaml
 config/sandbox.conf
 
 # OS

@@ -1,0 +1,10 @@
+name: kubernetes
+description: "Kubernetes cluster management and Helm package manager"
+install_script:
+  - kubectl.sh
+  - helm.sh
+provides_tools:
+  - name: kubectl
+    description: "Kubernetes cluster management CLI"
+  - name: helm
+    description: "Kubernetes package manager"

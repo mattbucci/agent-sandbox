@@ -1,0 +1,25 @@
+llm:
+  api_base: "http://192.168.1.100:4000/v1"
+  api_key: "sk-your-litellm-key"
+  model: "default-model"
+
+vm_defaults:
+  vcpus: 4
+  mem_mb: 8192
+
+network:
+  host_iface: "enp12s0"
+  subnet_prefix: "10.0"
+  novnc_base_port: 6080
+  ssh_base_port: 2200
+
+firecracker:
+  bin: "/usr/local/bin/firecracker"
+  jailer: "/usr/local/bin/jailer"
+
+rootfs:
+  size_mb: 8192
+
+squid:
+  http_port: 3128
+  https_port: 3129

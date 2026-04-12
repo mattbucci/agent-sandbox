@@ -29,46 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agent")
 
-BROWSER_INSTRUCTIONS = """
-## Browser Automation (agent-browser)
-
-You have `agent-browser` installed for web browsing. Use it via bash:
-
-```bash
-# Navigate to a page
-agent-browser open "https://example.com"
-
-# Get interactive elements (returns @ref IDs for targeting)
-agent-browser snapshot -i
-
-# Click, fill, type
-agent-browser click @e1
-agent-browser fill @e2 "search query"
-agent-browser press Enter
-
-# Take a screenshot
-agent-browser screenshot
-
-# Get page text/url/title
-agent-browser get text @e3
-agent-browser get url
-
-# Wait for conditions
-agent-browser wait --text "Success"
-agent-browser wait @e5
-
-# Batch multiple commands (more efficient)
-agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
-
-# Close when done
-agent-browser close
-```
-
-Prefer `agent-browser batch` when running 2+ commands in sequence.
-Use `snapshot -i` to discover interactive elements before clicking/filling.
-"""
-
-
 def init_tracing():
     """Initialize OpenTelemetry tracing if an endpoint is configured."""
     otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -120,12 +80,8 @@ def load_system_prompt() -> str:
     prompt_path = "/etc/agent/system-prompt.md"
     if os.path.exists(prompt_path):
         with open(prompt_path) as f:
-            base_prompt = f.read().strip()
-    else:
-        base_prompt = f"You are an AI agent of type: {os.environ.get('AGENT_TYPE', 'generic')}."
-
-    # Append browser instructions to every agent's prompt
-    return base_prompt + "\n\n" + BROWSER_INSTRUCTIONS
+            return f.read().strip()
+    return f"You are an AI agent of type: {os.environ.get('AGENT_TYPE', 'generic')}."
 
 
 def create_agent():

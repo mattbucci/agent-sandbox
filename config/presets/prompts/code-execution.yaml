@@ -1,0 +1,76 @@
+name: code-execution
+description: "Guidelines for choosing bash vs python and handling scripts and packages"
+rules:
+  - id: EXEC-001
+    rule: "Use bash for file operations, git commands, CLI tool invocations, and simple text processing."
+    example: |
+      # GOOD [EXEC-001]:
+      # File operations and git:
+      mkdir -p output && cp results/*.json output/
+      git diff --stat HEAD~3
+      find . -name "*.pyc" -delete
+
+      # Simple text extraction:
+      grep -c 'ERROR' /var/log/app.log
+      awk '{print $1}' access.log | sort | uniq -c | sort -rn | head -20
+
+      # BAD [EXEC-001]:
+      # Writing a Python script just to list files:
+      python3 -c "import os; print(os.listdir('.'))"
+
+  - id: EXEC-002
+    rule: "Use python3 for data processing, complex logic, API calls, JSON/CSV manipulation, and anything requiring error handling beyond simple conditionals."
+    example: |
+      # GOOD [EXEC-002]:
+      python3 <<'PYEOF'
+      import json, csv
+      with open("data.json") as f:
+          records = json.load(f)
+      with open("output.csv", "w", newline="") as f:
+          writer = csv.DictWriter(f, fieldnames=["id", "name", "score"])
+          writer.writeheader()
+          writer.writerows(sorted(records, key=lambda r: r["score"], reverse=True))
+      print(f"Wrote {len(records)} records to output.csv")
+      PYEOF
+
+      # BAD [EXEC-002]:
+      # Trying to parse nested JSON with bash and sed:
+      cat data.json | sed 's/[{},]//g' | awk -F: '{print $2}'
+
+  - id: EXEC-003
+    rule: "Install Python packages using uv pip install. Do not use pip directly."
+    example: |
+      # GOOD [EXEC-003]:
+      uv pip install requests pandas
+      python3 -c "import requests; print(requests.get('https://httpbin.org/ip').json())"
+
+      # BAD [EXEC-003]:
+      pip install requests
+      pip3 install --user pandas
+
+  - id: EXEC-004
+    rule: "For operations longer than ~20 lines, write the code to a file and execute it. Do not inline large scripts."
+    example: |
+      # GOOD [EXEC-004]:
+      cat > /tmp/analyze.py <<'PYEOF'
+      import json
+      import sys
+      from collections import Counter
+
+      def analyze_logs(path):
+          errors = Counter()
+          with open(path) as f:
+              for line in f:
+                  if "ERROR" in line:
+                      code = line.split("ERROR")[1].strip().split()[0]
+                      errors[code] += 1
+          return errors.most_common(10)
+
+      if __name__ == "__main__":
+          for code, count in analyze_logs(sys.argv[1]):
+              print(f"{count:>5}  {code}")
+      PYEOF
+      python3 /tmp/analyze.py /var/log/app.log
+
+      # BAD [EXEC-004]:
+      python3 -c "import json; import sys; from collections import Counter; ..." # 40 lines crammed into -c

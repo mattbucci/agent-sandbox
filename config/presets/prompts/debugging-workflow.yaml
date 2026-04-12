@@ -1,0 +1,73 @@
+name: debugging-workflow
+description: "Systematic debugging workflow: reproduce, narrow down, document, report"
+rules:
+  - id: DBG-001
+    rule: "Always reproduce the bug reliably before attempting to diagnose or fix it. Capture exact steps, inputs, and environment."
+    example: |
+      # GOOD [DBG-001]:
+      # 1. Start the service: docker compose up -d
+      # 2. Send the request: curl -X POST http://localhost:8080/api/login -d '{"user":"test"}'
+      # 3. Observe: HTTP 500 with "NullPointerException" in logs
+      # Reproduction confirmed on commit abc1234, Linux x86_64, Java 17.
+
+      # BAD [DBG-001]:
+      # "It crashes sometimes" — then immediately reading source code
+      # and guessing at fixes without a reliable reproduction.
+
+  - id: DBG-002
+    rule: "Narrow down the root cause methodically. Use binary search on commits (git bisect), strace/ltrace for syscall-level issues, gdb for crashes, and log-level increases for application bugs."
+    example: |
+      # GOOD [DBG-002]:
+      # Binary search through commits to find the regression:
+      git bisect start
+      git bisect bad HEAD
+      git bisect good v2.3.0
+      # ... test each midpoint ...
+
+      # Trace system calls to find why a file open fails:
+      strace -e openat -f ./myapp 2>&1 | grep ENOENT
+
+      # Attach gdb to inspect a segfault:
+      gdb -ex run -ex bt --args ./myapp --config test.conf
+
+      # BAD [DBG-002]:
+      # Randomly changing code and re-running until the error goes away.
+
+  - id: DBG-003
+    rule: "Document findings with evidence: log snippets, stack traces, strace output, bisect results. Never say 'it seems like' without supporting data."
+    example: |
+      # GOOD [DBG-003]:
+      # Root cause: connection pool exhaustion.
+      # Evidence:
+      #   - strace shows connect() returning ETIMEDOUT after 30s
+      #   - Application log: "HikariPool-1 - Connection is not available, request timed out after 30000ms"
+      #   - git bisect points to commit f4a2b1c which removed pool.maxSize config
+
+      # BAD [DBG-003]:
+      # "I think it might be a database issue, probably timeouts or something."
+
+  - id: DBG-004
+    rule: "Write a debugging report with: (1) symptom, (2) reproduction steps, (3) root cause with evidence, (4) fix applied or recommended, (5) verification that the fix resolves the issue."
+    example: |
+      # GOOD [DBG-004]:
+      # ## Symptom
+      # POST /api/login returns 500 under load (>100 concurrent users).
+      #
+      # ## Reproduction
+      # ab -n 500 -c 150 http://localhost:8080/api/login
+      # Failures begin at ~110 concurrent connections.
+      #
+      # ## Root cause
+      # Connection pool max size was removed in commit f4a2b1c,
+      # defaulting to 10. Under load, all 10 connections are held
+      # by slow auth queries, blocking new requests until timeout.
+      #
+      # ## Fix
+      # Restored pool.maxSize=50 in application.yaml.
+      # Commit: g7h8i9j "Restore connection pool max size to 50"
+      #
+      # ## Verification
+      # ab -n 500 -c 150 now completes with 0 failures.
+
+      # BAD [DBG-004]:
+      # "Fixed it. Was a config issue."

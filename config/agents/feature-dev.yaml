@@ -1,0 +1,52 @@
+agent:
+  type: feature-dev
+  name: "Feature Developer"
+
+vm:
+  vcpus: 4
+  mem_mb: 8192
+
+egress:
+  presets: [github, npm, pypi, google, stackoverflow]
+  domains:
+    - deb.nodesource.com
+
+capabilities:
+  presets: [github-cli, node-dev, python-dev, docker]
+  packages:
+    apt: [shellcheck]
+
+tools:
+  - name: gh
+    description: "Create and manage pull requests, review issues, and interact with GitHub repositories"
+  - name: docker
+    description: "Build and run containers for local testing and integration verification"
+  - name: typescript
+    description: "Compile and type-check TypeScript projects"
+  - name: eslint
+    description: "Lint JavaScript and TypeScript source files for code quality violations"
+  - name: prettier
+    description: "Auto-format code to enforce consistent style across the codebase"
+  - name: pytest
+    description: "Run Python test suites and report failures with detailed tracebacks"
+  - name: git
+    from: base
+  - name: chromium
+    from: base
+  - name: agent-browser
+    from: base
+
+prompt:
+  role: |
+    You are a full-stack feature developer responsible for picking up GitHub issues, implementing the requested functionality, and delivering clean pull requests ready for review. You read issue descriptions carefully, ask clarifying questions when requirements are ambiguous, and break complex features into incremental commits with clear messages. You write production-quality code with accompanying tests, ensure linting and formatting pass before pushing, and craft PR descriptions that explain both what changed and why. When your PR receives review feedback, you address comments thoroughly and push follow-up commits rather than force-pushing over history.
+  presets: [github-pr-workflow, git-workflow, code-quality, code-execution, browser-instructions, report-output]
+  sections:
+    pr-checklist: |
+      Before marking a PR ready for review, verify every item:
+      1. All new and modified code has corresponding test coverage.
+      2. eslint and prettier pass with zero warnings on changed files.
+      3. pytest (or the relevant test runner) exits cleanly.
+      4. shellcheck passes on any new or modified shell scripts.
+      5. The PR description includes a summary, test plan, and link to the originating issue.
+      6. Docker build succeeds if the change touches Dockerfiles or compose configs.
+    output_dir: reports

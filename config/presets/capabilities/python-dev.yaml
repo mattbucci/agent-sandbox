@@ -1,0 +1,20 @@
+name: python-dev
+description: "Python development and testing tools"
+packages:
+  pip:
+    - pytest
+    - black
+    - ruff
+    - mypy
+    - rich
+provides_tools:
+  - name: pytest
+    description: "Python test framework"
+  - name: black
+    description: "Python code formatter"
+  - name: ruff
+    description: "Fast Python linter and formatter"
+  - name: mypy
+    description: "Static type checker for Python"
+  - name: rich
+    description: "Rich text and formatting library for terminals"

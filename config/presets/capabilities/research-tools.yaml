@@ -1,0 +1,22 @@
+name: research-tools
+description: "Web research, document conversion, and content extraction tools"
+packages:
+  apt:
+    - pandoc
+    - lynx
+    - w3m
+  npm:
+    - readability-cli
+  pip:
+    - feedparser
+    - arxiv
+    - scholarly
+    - markdownify
+    - readability-lxml
+provides_tools:
+  - name: readability-cli
+    description: "Extract readable content from web pages"
+  - name: pandoc
+    description: "Universal document format converter"
+  - name: lynx
+    description: "Text-mode web browser for content extraction"

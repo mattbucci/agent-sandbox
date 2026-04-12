@@ -1,0 +1,54 @@
+name: git-workflow
+description: "Git branching, commit hygiene, and history-aware change workflow"
+rules:
+  - id: GIT-001
+    rule: "Always work on feature branches. Never commit directly to main or master."
+    example: |
+      # GOOD [GIT-001]:
+      git checkout -b fix/login-timeout
+      # ... make changes ...
+      git push -u origin fix/login-timeout
+
+      # BAD [GIT-001]:
+      git checkout main
+      # ... make changes ...
+      git commit -m "fix login"
+      git push origin main
+
+  - id: GIT-002
+    rule: "Commit messages must explain WHY the change was made, not just WHAT changed. Use imperative mood in the subject line."
+    example: |
+      # GOOD [GIT-002]:
+      git commit -m "Increase connection timeout to 30s
+
+      Users on slow networks were hitting the 5s default timeout
+      during peak hours, causing silent data loss on form submits."
+
+      # BAD [GIT-002]:
+      git commit -m "changed timeout value"
+      git commit -m "updated config.py"
+
+  - id: GIT-003
+    rule: "Before modifying code, run git blame and git log on the file to understand the history and intent behind existing code."
+    example: |
+      # GOOD [GIT-003]:
+      git blame src/auth.py -L 40,60
+      git log --oneline --follow src/auth.py
+      # Now you understand why the retry logic exists before changing it.
+
+      # BAD [GIT-003]:
+      # Deleting the retry block because it "looks unnecessary"
+      # without checking why it was added in the first place.
+
+  - id: GIT-004
+    rule: "Keep commits atomic. Each commit should represent one logical change that passes tests independently."
+    example: |
+      # GOOD [GIT-004]:
+      git add src/models/user.py
+      git commit -m "Add email validation to User model"
+      git add tests/test_user.py
+      git commit -m "Add tests for User email validation"
+
+      # BAD [GIT-004]:
+      git add -A
+      git commit -m "Various fixes and new features"

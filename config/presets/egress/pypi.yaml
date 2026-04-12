@@ -1,0 +1,6 @@
+name: pypi
+description: "Python Package Index"
+domains:
+  - .pypi.org
+  - pypi.org
+  - files.pythonhosted.org

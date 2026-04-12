@@ -19,8 +19,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-source "${SANDBOX_ROOT}/config/sandbox.conf"
 source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 source "${SANDBOX_ROOT}/lib/network.sh"
 
 AGENT_TYPE="${1:?Usage: launch.sh <agent-type> [--name NAME] [--vcpus N] [--mem MB]}"
@@ -41,11 +41,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Load agent config for defaults
-AGENT_CONF="${SANDBOX_ROOT}/config/agents/${AGENT_TYPE}.conf"
+# Load compiled agent config
+ensure_compiled "${AGENT_TYPE}"
+AGENT_CONF="${SANDBOX_ROOT}/build/${AGENT_TYPE}/agent.conf"
 if [[ ! -f "${AGENT_CONF}" ]]; then
     echo "ERROR: Unknown agent type '${AGENT_TYPE}'"
-    echo "Available: $(ls "${SANDBOX_ROOT}/config/agents/" | sed 's/.conf$//' | tr '\n' ' ')"
+    echo "Available: $(list_agent_types | tr '\n' ' ')"
     exit 1
 fi
 source "${AGENT_CONF}"
@@ -87,7 +88,7 @@ add_vm_nftables "${SLOT}" "${TAP_NAME}" "${GATEWAY_IP}"
 
 # --- 5. Generate Squid ACL ---
 echo "[4/7] Generating Squid ACL..."
-ALLOWLIST_FILE="${SANDBOX_ROOT}/rootfs/agents/${AGENT_TYPE}/allowlist.txt"
+ALLOWLIST_FILE="${SANDBOX_ROOT}/build/${AGENT_TYPE}/allowlist.txt"
 "${SANDBOX_ROOT}/network/squid/gen-acl.sh" "${SLOT}" "${AGENT_TYPE}" "${ALLOWLIST_FILE}"
 
 # Reload Squid

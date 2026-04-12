@@ -1,0 +1,17 @@
+name: research-sites
+description: "Technical news, research papers, and developer content"
+domains:
+  - news.ycombinator.com
+  - hacker-news.firebaseio.com
+  - .reddit.com
+  - .arxiv.org
+  - arxiv.org
+  - .scholar.google.com
+  - .wikipedia.org
+  - .medium.com
+  - .substack.com
+  - .dev.to
+  - .hackernoon.com
+  - .techcrunch.com
+  - .arstechnica.com
+  - .theregister.com

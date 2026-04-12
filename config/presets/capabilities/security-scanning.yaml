@@ -1,0 +1,38 @@
+name: security-scanning
+description: "Vulnerability scanning and security analysis tools"
+install_script:
+  - trivy.sh
+  - grype.sh
+  - semgrep.sh
+packages:
+  apt:
+    - nmap
+    - nikto
+    - net-tools
+    - whois
+    - dnsutils
+  pip:
+    - pip-audit
+    - safety
+    - bandit
+  npm:
+    - snyk
+provides_tools:
+  - name: trivy
+    description: "Container and filesystem vulnerability scanner"
+  - name: grype
+    description: "Container image and filesystem vulnerability scanner"
+  - name: semgrep
+    description: "Lightweight static analysis for many languages"
+  - name: nmap
+    description: "Network discovery and security auditing"
+  - name: nikto
+    description: "Web server vulnerability scanner"
+  - name: pip-audit
+    description: "Python dependency vulnerability auditor"
+  - name: safety
+    description: "Python dependency security checker"
+  - name: bandit
+    description: "Python source code security analyzer"
+  - name: snyk
+    description: "Developer-first security scanning CLI"

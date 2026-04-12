@@ -1,0 +1,6 @@
+name: github-cli
+description: "GitHub CLI for repository management and code review"
+install_script: github-cli.sh
+provides_tools:
+  - name: gh
+    description: "GitHub CLI for issues, PRs, releases, code review"

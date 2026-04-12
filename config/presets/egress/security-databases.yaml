@@ -1,0 +1,11 @@
+name: security-databases
+description: "Vulnerability databases and security advisories"
+domains:
+  - nvd.nist.gov
+  - .nist.gov
+  - .cve.org
+  - cve.mitre.org
+  - .osv.dev
+  - osv.dev
+  - security-tracker.debian.org
+  - .snyk.io

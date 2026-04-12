@@ -16,16 +16,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 
 AGENT_TYPE="${1:?Usage: prepare-rootfs.sh <agent-type> <instance-id> <vm-state-dir>}"
 INSTANCE_ID="${2:?Usage: prepare-rootfs.sh <agent-type> <instance-id> <vm-state-dir>}"
 VM_STATE_DIR="${3:?Usage: prepare-rootfs.sh <agent-type> <instance-id> <vm-state-dir>}"
 
-# Paths
+# Paths — use compiled artifacts
+ensure_compiled "${AGENT_TYPE}"
+BUILD_DIR="${SANDBOX_ROOT}/build/${AGENT_TYPE}"
 AGENT_ROOTFS="${SANDBOX_ROOT}/rootfs/agents/${AGENT_TYPE}/rootfs.ext4"
-AGENT_DIR="${SANDBOX_ROOT}/rootfs/agents/${AGENT_TYPE}"
-AGENT_CONF="${SANDBOX_ROOT}/config/agents/${AGENT_TYPE}.conf"
 INSTANCE_ROOTFS="${VM_STATE_DIR}/rootfs.ext4"
 
 # Validate
@@ -35,18 +36,8 @@ if [[ ! -f "${AGENT_ROOTFS}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "${AGENT_CONF}" ]]; then
-    echo "ERROR: Agent config not found: ${AGENT_CONF}"
-    exit 1
-fi
-
-# --- Load agent config ---
-source "${AGENT_CONF}"
-
-# Inherit globals if not overridden
-LLM_API_BASE="${LLM_API_BASE:-$(grep '^LLM_API_BASE=' "${SANDBOX_ROOT}/config/sandbox.conf" | cut -d= -f2- | tr -d '"')}"
-LLM_API_KEY="${LLM_API_KEY:-$(grep '^LLM_API_KEY=' "${SANDBOX_ROOT}/config/sandbox.conf" | cut -d= -f2- | tr -d '"')}"
-LLM_MODEL="${LLM_MODEL:-$(grep '^LLM_MODEL=' "${SANDBOX_ROOT}/config/sandbox.conf" | cut -d= -f2- | tr -d '"')}"
+# --- Load compiled agent + global config ---
+source "${BUILD_DIR}/agent.conf"
 
 # --- Copy rootfs (COW if supported) ---
 echo "Copying rootfs for instance ${INSTANCE_ID}..."
@@ -76,13 +67,9 @@ LLM_API_KEY="${LLM_API_KEY}"
 LLM_MODEL="${LLM_MODEL}"
 EOF
 
-# Write system prompt
+# Write compiled system prompt
 mkdir -p "${MOUNT_POINT}/etc/agent"
-if [[ -f "${AGENT_DIR}/system-prompt.md" ]]; then
-    cp "${AGENT_DIR}/system-prompt.md" "${MOUNT_POINT}/etc/agent/system-prompt.md"
-else
-    echo "You are a ${AGENT_TYPE} agent." > "${MOUNT_POINT}/etc/agent/system-prompt.md"
-fi
+cp "${BUILD_DIR}/system-prompt.md" "${MOUNT_POINT}/etc/agent/system-prompt.md"
 
 # Set hostname
 echo "${AGENT_TYPE}-${INSTANCE_ID}" > "${MOUNT_POINT}/etc/hostname"

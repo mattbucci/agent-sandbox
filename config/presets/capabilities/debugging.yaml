@@ -1,0 +1,24 @@
+name: debugging
+description: "System and application debugging tools"
+packages:
+  apt:
+    - gdb
+    - strace
+    - ltrace
+    - valgrind
+  pip:
+    - ipdb
+    - pdbpp
+provides_tools:
+  - name: gdb
+    description: "GNU debugger for C/C++ programs"
+  - name: strace
+    description: "System call tracer"
+  - name: ltrace
+    description: "Library call tracer"
+  - name: valgrind
+    description: "Memory error detector and profiler"
+  - name: ipdb
+    description: "IPython-enhanced Python debugger"
+  - name: pdbpp
+    description: "Enhanced Python debugger with syntax highlighting"

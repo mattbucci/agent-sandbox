@@ -1,0 +1,7 @@
+name: docker-hub
+description: "Docker Hub container registry"
+domains:
+  - .docker.io
+  - .docker.com
+  - registry-1.docker.io
+  - production.cloudflare.docker.com

@@ -1,0 +1,62 @@
+name: browser-instructions
+description: "Rules for web interaction using agent-browser CLI with snapshots and batching"
+rules:
+  - id: BROWSER-001
+    rule: "Use agent-browser for all web page interaction. Do not attempt to parse HTML manually or use wget for interactive pages."
+    example: |
+      # GOOD [BROWSER-001]:
+      agent-browser navigate "https://example.com/dashboard"
+      agent-browser snapshot
+
+      # BAD [BROWSER-001]:
+      wget -O page.html https://example.com/dashboard
+      grep -o 'class="status".*' page.html
+
+  - id: BROWSER-002
+    rule: "Always take a snapshot with agent-browser snapshot -i before clicking or interacting with elements. Use the snapshot to identify correct element selectors."
+    example: |
+      # GOOD [BROWSER-002]:
+      agent-browser navigate "https://example.com/settings"
+      agent-browser snapshot -i
+      # Snapshot shows: [btn-14] "Save Changes" button at (350, 600)
+      agent-browser click --element btn-14
+
+      # BAD [BROWSER-002]:
+      agent-browser navigate "https://example.com/settings"
+      agent-browser click --selector "button.save"
+      # Guessing selectors without a snapshot — fragile and error-prone.
+
+  - id: BROWSER-003
+    rule: "Use agent-browser batch to combine two or more sequential commands into a single call, reducing round-trips."
+    example: |
+      # GOOD [BROWSER-003]:
+      agent-browser batch \
+        'navigate "https://example.com/login"' \
+        'type --selector "#username" "admin"' \
+        'type --selector "#password" "hunter2"' \
+        'click --selector "#login-btn"'
+      agent-browser snapshot -i
+
+      # BAD [BROWSER-003]:
+      agent-browser navigate "https://example.com/login"
+      agent-browser type --selector "#username" "admin"
+      agent-browser type --selector "#password" "hunter2"
+      agent-browser click --selector "#login-btn"
+      # Four separate round-trips for a single login flow.
+
+  - id: BROWSER-004
+    rule: "Prefer curl and jq for API endpoints and structured data. Only use agent-browser for pages that require JavaScript rendering or interactive elements."
+    example: |
+      # GOOD [BROWSER-004]:
+      # API call — use curl:
+      curl -s https://api.example.com/v1/status | jq '.services[] | select(.healthy == false)'
+
+      # JavaScript-rendered dashboard — use agent-browser:
+      agent-browser navigate "https://app.example.com/dashboard"
+      agent-browser snapshot -i
+
+      # BAD [BROWSER-004]:
+      # Using the browser to hit a JSON API:
+      agent-browser navigate "https://api.example.com/v1/status"
+      agent-browser snapshot
+      # Needlessly slow — curl would return the data instantly.

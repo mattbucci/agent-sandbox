@@ -1,0 +1,51 @@
+name: report-output
+description: "Write structured markdown reports to the designated output directory"
+rules:
+  - id: RPT-001
+    rule: "Write all reports to the output_dir as markdown files. Never print long reports to stdout; always persist them to disk."
+    example: |
+      # GOOD [RPT-001]:
+      cat > "$output_dir/2026-04-12-security-audit.md" <<'EOF'
+      # Security Audit Report
+      ...
+      EOF
+      echo "Report written to $output_dir/2026-04-12-security-audit.md"
+
+      # BAD [RPT-001]:
+      # Dumping a 200-line report to the terminal with no file output.
+      echo "Here are all my findings: ..."
+
+  - id: RPT-002
+    rule: "Every report must include at minimum: Summary (key takeaways), Analysis (detailed findings with evidence), and Recommendations (prioritized action items)."
+    example: |
+      # GOOD [RPT-002]:
+      # ## Summary
+      # Found 3 critical CVEs in production dependencies.
+      #
+      # ## Analysis
+      # | Package   | CVE            | Severity | Description          |
+      # |-----------|----------------|----------|----------------------|
+      # | lodash    | CVE-2021-23337 | Critical | Prototype pollution  |
+      # ...
+      #
+      # ## Recommendations
+      # 1. **Immediate**: Upgrade lodash to 4.17.21
+      # 2. **Short-term**: Enable Dependabot for automated alerts
+      # 3. **Long-term**: Add npm audit to CI pipeline
+
+      # BAD [RPT-002]:
+      # A wall of text with no sections, no tables, no prioritization.
+      # "Found some vulnerabilities. Should probably fix them."
+
+  - id: RPT-003
+    rule: "Name report files with a date prefix in YYYY-MM-DD-topic.md format for chronological sorting."
+    example: |
+      # GOOD [RPT-003]:
+      # 2026-04-12-dependency-audit.md
+      # 2026-04-12-performance-baseline.md
+      # 2026-04-10-incident-postmortem.md
+
+      # BAD [RPT-003]:
+      # report.md
+      # final_report_v2_FINAL.md
+      # audit-results.txt

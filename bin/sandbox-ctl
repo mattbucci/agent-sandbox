@@ -26,9 +26,9 @@ set -euo pipefail
 SANDBOX_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export SANDBOX_ROOT
 
-# Load config
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+# Load config (ensure_global_compiled sources build/sandbox.conf)
 source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 
 # --- Commands ---
 
@@ -80,6 +80,10 @@ cmd_build_agent() {
     local agent_type="${1:?Usage: sandbox-ctl build-agent <type>}"
     validate_agent_type "${agent_type}"
 
+    # Compile YAML → flat artifacts
+    ensure_compiled "${agent_type}"
+    local build_dir="${SANDBOX_ROOT}/build/${agent_type}"
+
     local base_rootfs="${SANDBOX_ROOT}/rootfs/base.ext4"
     local agent_dir="${SANDBOX_ROOT}/rootfs/agents/${agent_type}"
     local agent_rootfs="${agent_dir}/rootfs.ext4"
@@ -99,29 +103,16 @@ cmd_build_agent() {
     fi
 
     log_info "Building ${agent_type} agent rootfs..."
+    log_info "Using compiled config from ${build_dir}/"
 
     # Copy base image
     log_info "Cloning base rootfs..."
+    mkdir -p "${agent_dir}"
     cp --reflink=auto --sparse=always "${base_rootfs}" "${agent_rootfs}"
 
     # Mount and customize
     local mount_point
     mount_point=$(mktemp -d)
-
-    cleanup() {
-        umount -lf "${mount_point}" 2>/dev/null || true
-        rmdir "${mount_point}" 2>/dev/null || true
-    }
-    trap cleanup EXIT
-
-    mount -o loop "${agent_rootfs}" "${mount_point}"
-
-    # Mount filesystems for chroot
-    mount --bind /dev     "${mount_point}/dev"
-    mount --bind /dev/pts "${mount_point}/dev/pts"
-    mount -t proc  proc   "${mount_point}/proc"
-    mount -t sysfs sysfs  "${mount_point}/sys"
-    mount -t tmpfs tmpfs  "${mount_point}/tmp"
 
     cleanup() {
         umount -lf "${mount_point}/tmp"     2>/dev/null || true
@@ -134,20 +125,25 @@ cmd_build_agent() {
     }
     trap cleanup EXIT
 
-    # Run customize script
-    if [[ -f "${agent_dir}/customize.sh" ]]; then
+    mount -o loop "${agent_rootfs}" "${mount_point}"
+    mount --bind /dev     "${mount_point}/dev"
+    mount --bind /dev/pts "${mount_point}/dev/pts"
+    mount -t proc  proc   "${mount_point}/proc"
+    mount -t sysfs sysfs  "${mount_point}/sys"
+    mount -t tmpfs tmpfs  "${mount_point}/tmp"
+
+    # Run compiled customize.sh (from YAML presets)
+    if [[ -f "${build_dir}/customize.sh" ]]; then
         log_info "Running customization for ${agent_type}..."
-        cp "${agent_dir}/customize.sh" "${mount_point}/tmp/customize.sh"
+        cp "${build_dir}/customize.sh" "${mount_point}/tmp/customize.sh"
         chmod +x "${mount_point}/tmp/customize.sh"
         chroot "${mount_point}" /tmp/customize.sh
         rm -f "${mount_point}/tmp/customize.sh"
     fi
 
-    # Copy system prompt
+    # Copy compiled system prompt
     mkdir -p "${mount_point}/etc/agent"
-    if [[ -f "${agent_dir}/system-prompt.md" ]]; then
-        cp "${agent_dir}/system-prompt.md" "${mount_point}/etc/agent/system-prompt.md"
-    fi
+    cp "${build_dir}/system-prompt.md" "${mount_point}/etc/agent/system-prompt.md"
 
     # Clean up
     chroot "${mount_point}" bash -c '
@@ -342,16 +338,39 @@ cmd_ssh() {
 }
 
 cmd_list_agents() {
-    echo "Available agent types:"
-    echo ""
-    for agent_type in $(list_agent_types); do
-        local conf="${SANDBOX_ROOT}/config/agents/${agent_type}.conf"
-        local name=""
-        [[ -f "${conf}" ]] && name=$(grep '^AGENT_NAME=' "${conf}" | cut -d= -f2- | tr -d '"')
-        printf "  %-15s %s\n" "${agent_type}" "${name}"
-    done
-    echo ""
-    echo "Use 'sandbox-ctl launch <type>' to start a VM."
+    python3 "${SANDBOX_ROOT}/lib/agentconf.py" list
+}
+
+cmd_config() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    case "${subcmd}" in
+        compile)
+            if [[ $# -gt 0 ]]; then
+                python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile "$1"
+            else
+                python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile-all
+            fi
+            ;;
+        validate)
+            local agent="${1:?Usage: sandbox-ctl config validate <type>}"
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" validate "${agent}"
+            ;;
+        list-presets)
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" list-presets "$@"
+            ;;
+        docs)
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" docs
+            ;;
+        *)
+            echo "Usage: sandbox-ctl config <subcommand>"
+            echo ""
+            echo "  compile [type]       Compile agent YAML → build/ (all if no type)"
+            echo "  validate <type>      Validate an agent YAML"
+            echo "  list-presets [cat]   List available presets (egress|capabilities|prompts)"
+            echo "  docs                 Generate docs/presets-reference.md"
+            ;;
+    esac
 }
 
 cmd_network_status() {
@@ -459,6 +478,12 @@ Access:
   logs <id|name|type>      Tail a VM's serial console log
   ssh <id|name|type>       SSH into a VM
 
+Config:
+  config compile [type]    Compile agent YAML → build/ (all if no type)
+  config validate <type>   Validate an agent YAML definition
+  config list-presets      List available presets by category
+  config docs              Generate docs/presets-reference.md
+
 Info:
   list-agents              Show available agent types
   network-status           Show TAP devices, nftables, Squid status
@@ -494,6 +519,7 @@ case "${COMMAND}" in
     logs)           cmd_logs "$@" ;;
     ssh)            cmd_ssh "$@" ;;
     list-agents)    cmd_list_agents "$@" ;;
+    config)         cmd_config "$@" ;;
     network-status) cmd_network_status "$@" ;;
     cleanup)        cmd_cleanup "$@" ;;
     help|--help|-h) cmd_help ;;

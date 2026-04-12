@@ -1,0 +1,5 @@
+name: stackoverflow
+description: "Stack Overflow and Stack Exchange Q&A sites"
+domains:
+  - .stackoverflow.com
+  - .stackexchange.com
