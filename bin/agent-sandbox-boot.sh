@@ -13,7 +13,8 @@ set -euo pipefail
 SANDBOX_ROOT="/home/letsrtfm/AI/agent-sandbox"
 export SANDBOX_ROOT
 
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 source "${SANDBOX_ROOT}/lib/common.sh"
 source "${SANDBOX_ROOT}/lib/network.sh"
 

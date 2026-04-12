@@ -17,7 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 source "${SANDBOX_ROOT}/lib/common.sh"
 source "${SANDBOX_ROOT}/lib/network.sh"
 

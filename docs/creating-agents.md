@@ -212,6 +212,7 @@ Prompt presets use a **rulebook format** — each rule has an ID, a clear statem
 | `report-output` | RPT-001 to RPT-003: structured markdown reports |
 | `security-scan-workflow` | SEC-001 to SEC-005: scan → audit → report |
 | `research-sweep` | RES-001 to RES-004: multi-source research |
+| `explore-tools` | TOOLS-001 to TOOLS-003: discover tools via `explore-tools` CLI |
 
 Agents reference rule IDs in their reasoning (e.g., "Per [GIT-002], here's why I made this change..."), making behavior auditable in traces.
 
@@ -274,6 +275,53 @@ rules:
 
       # BAD [IR-002]:
       # Fixing everything first, then trying to reconstruct what happened
+```
+
+## Base Image Tools
+
+Every agent VM includes these tools regardless of what's in the YAML (from the base rootfs build). Declare them in your `tools:` section with `from: base`:
+
+```yaml
+tools:
+  - name: git
+    from: base
+  - name: chromium
+    from: base
+  - name: agent-browser
+    from: base
+```
+
+| Tool | Category |
+|------|----------|
+| `chromium-browser` | Web browser |
+| `agent-browser` | CLI browser automation |
+| `explore-tools` | Tool discovery with LLM-powered search |
+| `git`, `curl`, `wget`, `jq` | Core utilities |
+| `python3.12`, `uv`, `node`, `npm` | Language runtimes |
+| `build-essential`, `strace`, `gdb` | Development tools |
+| `vim`, `nano`, `ssh` | System tools |
+
+## Install Scripts
+
+Complex tool installations live in `config/install-scripts/`:
+
+```
+config/install-scripts/
+  github-cli.sh     # gh via apt keyring
+  terraform.sh      # HashiCorp apt repo
+  kubectl.sh        # Kubernetes apt repo
+  helm.sh           # get-helm-3 installer
+  trivy.sh          # Aqua Security installer
+  grype.sh          # Anchore installer
+  sentry-cli.sh     # Sentry CLI installer
+  semgrep.sh        # pip install
+```
+
+Reference them from a capability preset or directly in your agent YAML:
+
+```yaml
+capabilities:
+  install_scripts: [my-tool.sh]
 ```
 
 ## How It Works

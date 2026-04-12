@@ -15,7 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 
 SLOT="${1:?Usage: gen-acl.sh <slot> <agent-type> <allowlist-file>}"
 AGENT_TYPE="${2:?Usage: gen-acl.sh <slot> <agent-type> <allowlist-file>}"

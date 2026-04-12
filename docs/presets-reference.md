@@ -240,6 +240,14 @@ Rules (4):
 - **[DBG-003]** Document findings with evidence: log snippets, stack traces, strace output, bisect results. Never say 'it seems like' without supporting data.
 - **[DBG-004]** Write a debugging report with: (1) symptom, (2) reproduction steps, (3) root cause with evidence, (4) fix applied or recommended, (5) verification that the fix resolves the issue.
 
+### `explore-tools`
+Rules for discovering and using CLI tools via the explore-tools registry
+
+Rules (3):
+- **[TOOLS-001]** Before using an unfamiliar tool, run 'explore-tools show <tool>' to read its documentation and examples.
+- **[TOOLS-002]** Use 'explore-tools suggest' to find the right tool for a task. Use 'explore-tools search' for keyword lookups. Use 'explore-tools ask' for complex questions.
+- **[TOOLS-003]** Use 'explore-tools list' to browse all available tools by category before starting a task.
+
 ### `git-workflow`
 Git branching, commit hygiene, and history-aware change workflow
 

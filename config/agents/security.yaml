@@ -14,7 +14,7 @@ github:
   permissions: [contents:read, security_events:read, dependabot_alerts:read]
 
 capabilities:
-  presets: [security-scanning, github-cli, python-dev]
+  presets: [security-scanning, github-cli, python-dev, node-dev]
 
 tools:
   - name: trivy

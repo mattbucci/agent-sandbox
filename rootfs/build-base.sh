@@ -18,7 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Load config
-source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+ensure_global_compiled
 
 ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-8192}"
 ROOTFS_IMG="${SANDBOX_ROOT}/rootfs/base.ext4"

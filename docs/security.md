@@ -134,7 +134,10 @@ These are inherent to the architecture and cannot be fully eliminated:
 - [x] Disable IPv6 in guest (`ipv6.disable=1` kernel boot param) — prevents IPv6 filter bypass
 - [x] Block host SSH from VMs (nftables INPUT chain drop on tcp/22 from tap-vm*)
 - [x] Block ICMP to external hosts (remove broad squid-outbound forward rule)
-- [ ] Switch from raw `firecracker` to `jailer` (adds seccomp + chroot + uid drop)
+- [x] Switch from raw `firecracker` to `jailer` (adds seccomp + chroot + uid drop)
+- [x] Network rate limiting (100 Mbit/s per VM via Firecracker rate_limiter)
+- [x] Host hardening script (KSM, swap, cgroups, logrotate) — `bin/harden-host.sh`
+- [x] Fine-grained GitHub tokens only (reject classic PATs, SSH keys) — `bin/setup-github-tokens.sh`
 - [ ] Enable Squid access logging and ship to central log
 - [ ] Add dnsmasq query rate limiting
 - [ ] Block TLS ECH at Squid level
