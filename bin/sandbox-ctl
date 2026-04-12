@@ -63,6 +63,11 @@ cmd_setup() {
     "${SANDBOX_ROOT}/otel/setup-otel.sh"
     echo ""
 
+    # 6. Production host hardening
+    log_info "Step 6: Applying production host hardening..."
+    "${SANDBOX_ROOT}/bin/harden-host.sh"
+    echo ""
+
     log_ok "Setup complete! Next steps:"
     echo "  1. Edit config/sandbox.conf with your LiteLLM URL and API key"
     echo "  2. Run: sudo sandbox-ctl build-base"

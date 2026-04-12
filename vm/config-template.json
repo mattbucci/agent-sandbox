@@ -19,7 +19,13 @@
     {
       "iface_id": "eth0",
       "guest_mac": "__GUEST_MAC__",
-      "host_dev_name": "__TAP_NAME__"
+      "host_dev_name": "__TAP_NAME__",
+      "rx_rate_limiter": {
+        "bandwidth": { "size": 104857600, "refill_time": 1000 }
+      },
+      "tx_rate_limiter": {
+        "bandwidth": { "size": 104857600, "refill_time": 1000 }
+      }
     }
   ],
   "logger": {

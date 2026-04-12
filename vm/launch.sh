@@ -131,12 +131,51 @@ echo "[6/7] Starting Firecracker..."
 # Remove stale socket
 rm -f "${FC_SOCKET}"
 
-# Launch Firecracker in background
-${FIRECRACKER_BIN} \
-    --api-sock "${FC_SOCKET}" \
-    --config-file "${FC_CONFIG}" \
-    &>"${LOG_FILE}.stdout" &
-FC_PID=$!
+# Use jailer if available (production), fall back to raw firecracker (dev)
+USE_JAILER=0
+if [[ -x "${JAILER_BIN:-/usr/local/bin/jailer}" ]] && [[ "${NO_JAILER:-0}" != "1" ]]; then
+    USE_JAILER=1
+fi
+
+if [[ ${USE_JAILER} -eq 1 ]]; then
+    # Jailer setup: creates chroot, drops privileges, applies seccomp
+    JAILER_DIR="/srv/jailer"
+    JAIL_ID="${INSTANCE_ID}"
+    mkdir -p "${JAILER_DIR}"
+
+    # Jailer needs the kernel and rootfs inside its chroot — use hard links
+    JAIL_ROOT="${JAILER_DIR}/firecracker/${JAIL_ID}/root"
+    mkdir -p "${JAIL_ROOT}"
+
+    # Create a dedicated uid/gid for this VM (base 10000 + slot)
+    JAIL_UID=$((10000 + SLOT))
+    JAIL_GID=$((10000 + SLOT))
+
+    # Ensure the user exists (or use numeric uid)
+    id -u "fc-${SLOT}" &>/dev/null 2>&1 || \
+        useradd -r -u "${JAIL_UID}" -s /usr/sbin/nologin "fc-${SLOT}" 2>/dev/null || true
+
+    # Hard-link kernel and rootfs into jail (jailer copies them)
+    ${JAILER_BIN} \
+        --id "${JAIL_ID}" \
+        --exec-file "${FIRECRACKER_BIN}" \
+        --uid "${JAIL_UID}" \
+        --gid "${JAIL_GID}" \
+        --chroot-base-dir "${JAILER_DIR}" \
+        --netns "/var/run/netns/default" \
+        -- \
+        --config-file "${FC_CONFIG}" \
+        &>"${LOG_FILE}.stdout" &
+    FC_PID=$!
+else
+    # Development mode: raw firecracker (no jailer)
+    echo "  (jailer not available or NO_JAILER=1 — using raw firecracker)"
+    ${FIRECRACKER_BIN} \
+        --api-sock "${FC_SOCKET}" \
+        --config-file "${FC_CONFIG}" \
+        &>"${LOG_FILE}.stdout" &
+    FC_PID=$!
+fi
 
 echo "${FC_PID}" > "${VM_STATE_DIR}/firecracker.pid"
 
