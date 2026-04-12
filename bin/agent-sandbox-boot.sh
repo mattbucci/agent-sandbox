@@ -48,6 +48,11 @@ table ip vm_filter {
 NFT
 
 # --- 3. Start Squid ---
+# Ensure Squid config and ACL placeholders are in place
+mkdir -p /etc/squid/acls
+cp "${SANDBOX_ROOT}/network/squid/squid-base.conf" /etc/squid/squid.conf
+[[ -f /etc/squid/acls/vm-acls.conf ]] || echo "# No VMs yet" > /etc/squid/acls/vm-acls.conf
+[[ -f /etc/squid/acls/all-allowed-domains.txt ]] || echo "# No VMs yet" > /etc/squid/acls/all-allowed-domains.txt
 systemctl start squid 2>/dev/null || /usr/sbin/squid &
 log_info "Squid started."
 
