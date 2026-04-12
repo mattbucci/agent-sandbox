@@ -1,0 +1,498 @@
+#!/usr/bin/env bash
+# =============================================================================
+# sandbox-ctl — CLI for managing Firecracker agent sandboxes
+#
+# Usage: sandbox-ctl <command> [options]
+#
+# Commands:
+#   setup              Install dependencies, fetch kernel, configure host network
+#   build-base         Build the base Ubuntu rootfs image
+#   build-agent TYPE   Build an agent-specific rootfs from base
+#   build-all          Build base + all agent rootfs images
+#   launch TYPE        Launch a new VM of the given agent type
+#   stop ID|NAME       Stop a running VM
+#   stop-all           Stop all running VMs
+#   status             List all VMs with status
+#   status --html      Generate HTML dashboard
+#   vnc ID|NAME        Print noVNC URL for a VM
+#   logs ID|NAME       Tail a VM's serial console log
+#   ssh ID|NAME        SSH into a VM
+#   list-agents        Show available agent types
+#   network-status     Show network configuration
+#   cleanup            Remove stopped VM state and reclaim disk
+# =============================================================================
+set -euo pipefail
+
+SANDBOX_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export SANDBOX_ROOT
+
+# Load config
+source "${SANDBOX_ROOT}/config/sandbox.conf"
+source "${SANDBOX_ROOT}/lib/common.sh"
+
+# --- Commands ---
+
+cmd_setup() {
+    require_root "setup"
+
+    log_info "=== Agent Sandbox Setup ==="
+    echo ""
+
+    # 1. Install Firecracker
+    log_info "Step 1: Installing Firecracker..."
+    "${SANDBOX_ROOT}/bin/install-firecracker.sh"
+    echo ""
+
+    # 2. Fetch kernel
+    log_info "Step 2: Fetching kernel..."
+    "${SANDBOX_ROOT}/kernel/fetch-kernel.sh"
+    echo ""
+
+    # 3. Setup noVNC
+    log_info "Step 3: Setting up noVNC..."
+    "${SANDBOX_ROOT}/novnc/setup-novnc.sh"
+    echo ""
+
+    # 4. Setup host network
+    log_info "Step 4: Configuring host network..."
+    "${SANDBOX_ROOT}/network/setup-host-network.sh"
+    echo ""
+
+    log_ok "Setup complete! Next steps:"
+    echo "  1. Edit config/sandbox.conf with your LiteLLM URL and API key"
+    echo "  2. Run: sudo sandbox-ctl build-base"
+    echo "  3. Run: sudo sandbox-ctl build-all"
+    echo "  4. Run: sudo sandbox-ctl launch <agent-type>"
+}
+
+cmd_build_base() {
+    require_root "build-base"
+    "${SANDBOX_ROOT}/rootfs/build-base.sh"
+}
+
+cmd_build_agent() {
+    require_root "build-agent"
+    local agent_type="${1:?Usage: sandbox-ctl build-agent <type>}"
+    validate_agent_type "${agent_type}"
+
+    local base_rootfs="${SANDBOX_ROOT}/rootfs/base.ext4"
+    local agent_dir="${SANDBOX_ROOT}/rootfs/agents/${agent_type}"
+    local agent_rootfs="${agent_dir}/rootfs.ext4"
+
+    if [[ ! -f "${base_rootfs}" ]]; then
+        log_error "Base rootfs not found. Run 'sandbox-ctl build-base' first."
+        exit 1
+    fi
+
+    if [[ -f "${agent_rootfs}" ]]; then
+        log_warn "Agent rootfs already exists: ${agent_rootfs}"
+        read -rp "Rebuild? [y/N] " confirm
+        if [[ "${confirm}" != "y" && "${confirm}" != "Y" ]]; then
+            exit 0
+        fi
+        rm -f "${agent_rootfs}"
+    fi
+
+    log_info "Building ${agent_type} agent rootfs..."
+
+    # Copy base image
+    log_info "Cloning base rootfs..."
+    cp --reflink=auto --sparse=always "${base_rootfs}" "${agent_rootfs}"
+
+    # Mount and customize
+    local mount_point
+    mount_point=$(mktemp -d)
+
+    cleanup() {
+        umount -lf "${mount_point}" 2>/dev/null || true
+        rmdir "${mount_point}" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+
+    mount -o loop "${agent_rootfs}" "${mount_point}"
+
+    # Mount filesystems for chroot
+    mount --bind /dev     "${mount_point}/dev"
+    mount --bind /dev/pts "${mount_point}/dev/pts"
+    mount -t proc  proc   "${mount_point}/proc"
+    mount -t sysfs sysfs  "${mount_point}/sys"
+    mount -t tmpfs tmpfs  "${mount_point}/tmp"
+
+    cleanup() {
+        umount -lf "${mount_point}/tmp"     2>/dev/null || true
+        umount -lf "${mount_point}/sys"     2>/dev/null || true
+        umount -lf "${mount_point}/proc"    2>/dev/null || true
+        umount -lf "${mount_point}/dev/pts" 2>/dev/null || true
+        umount -lf "${mount_point}/dev"     2>/dev/null || true
+        umount -lf "${mount_point}"         2>/dev/null || true
+        rmdir "${mount_point}" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+
+    # Run customize script
+    if [[ -f "${agent_dir}/customize.sh" ]]; then
+        log_info "Running customization for ${agent_type}..."
+        cp "${agent_dir}/customize.sh" "${mount_point}/tmp/customize.sh"
+        chmod +x "${mount_point}/tmp/customize.sh"
+        chroot "${mount_point}" /tmp/customize.sh
+        rm -f "${mount_point}/tmp/customize.sh"
+    fi
+
+    # Copy system prompt
+    mkdir -p "${mount_point}/etc/agent"
+    if [[ -f "${agent_dir}/system-prompt.md" ]]; then
+        cp "${agent_dir}/system-prompt.md" "${mount_point}/etc/agent/system-prompt.md"
+    fi
+
+    # Clean up
+    chroot "${mount_point}" bash -c '
+        apt-get clean 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/*
+    '
+
+    cleanup
+    trap - EXIT
+
+    log_ok "Agent rootfs built: ${agent_rootfs}"
+    echo "  Size: $(du -h "${agent_rootfs}" | cut -f1)"
+}
+
+cmd_build_all() {
+    require_root "build-all"
+
+    # Build base if needed
+    if [[ ! -f "${SANDBOX_ROOT}/rootfs/base.ext4" ]]; then
+        cmd_build_base
+    fi
+
+    # Build all agent types
+    for agent_type in $(list_agent_types); do
+        echo ""
+        log_info "--- Building agent: ${agent_type} ---"
+        cmd_build_agent "${agent_type}"
+    done
+
+    echo ""
+    log_ok "All agent rootfs images built."
+}
+
+cmd_launch() {
+    require_root "launch"
+    local agent_type="${1:?Usage: sandbox-ctl launch <type> [--name NAME] [--vcpus N] [--mem MB]}"
+    shift
+    validate_agent_type "${agent_type}"
+    "${SANDBOX_ROOT}/vm/launch.sh" "${agent_type}" "$@"
+}
+
+cmd_stop() {
+    require_root "stop"
+    local query="${1:?Usage: sandbox-ctl stop <instance-id|name|type>}"
+    local instance_id
+    instance_id=$(resolve_vm "${query}")
+    "${SANDBOX_ROOT}/vm/stop.sh" "${instance_id}"
+}
+
+cmd_stop_all() {
+    require_root "stop-all"
+    local count=0
+
+    if [[ ! -d "${STATE_DIR}/vms" ]]; then
+        log_info "No VMs running."
+        return
+    fi
+
+    for info in "${STATE_DIR}"/vms/*/info.json; do
+        [[ -f "${info}" ]] || continue
+        local instance_id
+        instance_id=$(jq -r '.instance_id' "${info}")
+        local pid
+        pid=$(jq -r '.firecracker_pid' "${info}")
+
+        if kill -0 "${pid}" 2>/dev/null; then
+            "${SANDBOX_ROOT}/vm/stop.sh" "${instance_id}"
+            ((count++))
+        else
+            # Clean up stale state
+            local slot tap
+            slot=$(jq -r '.slot' "${info}")
+            tap=$(jq -r '.tap_device' "${info}")
+            source "${SANDBOX_ROOT}/lib/network.sh"
+            cleanup_vm_network "${slot}" "${tap}" 2>/dev/null || true
+            rm -rf "$(dirname "${info}")"
+        fi
+    done
+
+    log_ok "Stopped ${count} VM(s)."
+}
+
+cmd_status() {
+    local html_mode=0
+    [[ "${1:-}" == "--html" ]] && html_mode=1
+
+    if [[ ! -d "${STATE_DIR}/vms" ]] || [[ -z "$(ls -A "${STATE_DIR}/vms" 2>/dev/null)" ]]; then
+        if [[ ${html_mode} -eq 1 ]]; then
+            generate_html_dashboard "[]"
+        else
+            echo "No VMs found."
+        fi
+        return
+    fi
+
+    local vm_data="["
+    local first=1
+
+    printf "%-20s %-12s %-5s %-14s %-6s %-8s %-8s %s\n" \
+        "INSTANCE" "TYPE" "SLOT" "IP" "STATUS" "vCPUs" "RAM" "noVNC"
+    printf "%s\n" "$(printf '%.0s-' {1..100})"
+
+    for info in "${STATE_DIR}"/vms/*/info.json; do
+        [[ -f "${info}" ]] || continue
+
+        local instance_id name agent_type slot vm_ip vcpus mem_mb novnc_port pid started_at
+        instance_id=$(jq -r '.instance_id' "${info}")
+        name=$(jq -r '.name' "${info}")
+        agent_type=$(jq -r '.agent_type' "${info}")
+        slot=$(jq -r '.slot' "${info}")
+        vm_ip=$(jq -r '.vm_ip' "${info}")
+        vcpus=$(jq -r '.vcpus' "${info}")
+        mem_mb=$(jq -r '.mem_mb' "${info}")
+        novnc_port=$(jq -r '.novnc_port' "${info}")
+        pid=$(jq -r '.firecracker_pid' "${info}")
+        started_at=$(jq -r '.started_at' "${info}")
+
+        local status="STOPPED"
+        if kill -0 "${pid}" 2>/dev/null; then
+            status="RUNNING"
+        fi
+
+        local host
+        host=$(hostname -f 2>/dev/null || hostname)
+
+        printf "%-20s %-12s %-5s %-14s %-6s %-8s %-8s %s\n" \
+            "${instance_id}" "${agent_type}" "${slot}" "${vm_ip}" \
+            "${status}" "${vcpus}" "${mem_mb}MB" "http://${host}:${novnc_port}"
+
+        if [[ ${html_mode} -eq 1 ]]; then
+            [[ ${first} -eq 0 ]] && vm_data+=","
+            vm_data+="{\"instance_id\":\"${instance_id}\",\"name\":\"${name}\",\"agent_type\":\"${agent_type}\",\"slot\":${slot},\"vm_ip\":\"${vm_ip}\",\"vcpus\":${vcpus},\"mem_mb\":${mem_mb},\"novnc_port\":${novnc_port},\"started_at\":\"${started_at}\",\"status\":\"${status}\"}"
+            first=0
+        fi
+    done
+
+    vm_data+="]"
+
+    if [[ ${html_mode} -eq 1 ]]; then
+        generate_html_dashboard "${vm_data}"
+    fi
+}
+
+generate_html_dashboard() {
+    local vm_json="$1"
+    local output="${SANDBOX_ROOT}/novnc/dashboard.html"
+
+    sed "s|__VM_DATA__|${vm_json}|g" "${SANDBOX_ROOT}/novnc/index.html" > "${output}"
+    log_ok "Dashboard generated: ${output}"
+}
+
+cmd_vnc() {
+    local query="${1:?Usage: sandbox-ctl vnc <instance-id|name|type>}"
+    local instance_id
+    instance_id=$(resolve_vm "${query}")
+    local info
+    info=$(get_vm_info "${instance_id}")
+    local port host
+    port=$(echo "${info}" | jq -r '.novnc_port')
+    host=$(hostname -f 2>/dev/null || hostname)
+    echo "http://${host}:${port}/vnc.html?autoconnect=true"
+}
+
+cmd_logs() {
+    local query="${1:?Usage: sandbox-ctl logs <instance-id|name|type>}"
+    local instance_id
+    instance_id=$(resolve_vm "${query}")
+    local info
+    info=$(get_vm_info "${instance_id}")
+    local log_file
+    log_file=$(echo "${info}" | jq -r '.log_file')
+
+    if [[ -f "${log_file}" ]]; then
+        tail -f "${log_file}"
+    else
+        log_error "Log file not found: ${log_file}"
+        exit 1
+    fi
+}
+
+cmd_ssh() {
+    local query="${1:?Usage: sandbox-ctl ssh <instance-id|name|type>}"
+    local instance_id
+    instance_id=$(resolve_vm "${query}")
+    local info
+    info=$(get_vm_info "${instance_id}")
+    local vm_ip
+    vm_ip=$(echo "${info}" | jq -r '.vm_ip')
+
+    echo "Connecting to ${instance_id} at ${vm_ip}..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null agent@"${vm_ip}"
+}
+
+cmd_list_agents() {
+    echo "Available agent types:"
+    echo ""
+    for agent_type in $(list_agent_types); do
+        local conf="${SANDBOX_ROOT}/config/agents/${agent_type}.conf"
+        local name=""
+        [[ -f "${conf}" ]] && name=$(grep '^AGENT_NAME=' "${conf}" | cut -d= -f2- | tr -d '"')
+        printf "  %-15s %s\n" "${agent_type}" "${name}"
+    done
+    echo ""
+    echo "Use 'sandbox-ctl launch <type>' to start a VM."
+}
+
+cmd_network_status() {
+    echo "=== Network Status ==="
+    echo ""
+
+    echo "--- TAP Devices ---"
+    ip link show type tuntap 2>/dev/null || echo "  (none)"
+    echo ""
+
+    echo "--- nftables (vm_filter) ---"
+    nft list table ip vm_filter 2>/dev/null || echo "  (table not found — run sandbox-ctl setup)"
+    echo ""
+
+    echo "--- Squid ---"
+    if pgrep -x squid &>/dev/null; then
+        echo "  Status: running (PID $(pgrep -x squid | head -1))"
+        echo "  ACLs:"
+        ls -la /etc/squid/acls/vm-*.conf 2>/dev/null || echo "    (none)"
+    else
+        echo "  Status: not running"
+    fi
+    echo ""
+
+    echo "--- dnsmasq ---"
+    if pgrep -x dnsmasq &>/dev/null; then
+        echo "  Status: running (PID $(pgrep -x dnsmasq | head -1))"
+    else
+        echo "  Status: not running"
+    fi
+}
+
+cmd_cleanup() {
+    require_root "cleanup"
+
+    if [[ ! -d "${STATE_DIR}/vms" ]]; then
+        log_info "Nothing to clean up."
+        return
+    fi
+
+    local cleaned=0
+    for vm_dir in "${STATE_DIR}"/vms/*/; do
+        [[ -d "${vm_dir}" ]] || continue
+        local info="${vm_dir}/info.json"
+        [[ -f "${info}" ]] || continue
+
+        local pid
+        pid=$(jq -r '.firecracker_pid' "${info}" 2>/dev/null)
+
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            local instance_id
+            instance_id=$(jq -r '.instance_id' "${info}")
+            log_info "Cleaning up stopped VM: ${instance_id}"
+
+            # Clean up network if still present
+            local slot tap
+            slot=$(jq -r '.slot' "${info}")
+            tap=$(jq -r '.tap_device' "${info}")
+            source "${SANDBOX_ROOT}/lib/network.sh"
+            cleanup_vm_network "${slot}" "${tap}" 2>/dev/null || true
+
+            # Remove Squid ACLs
+            rm -f "/etc/squid/acls/vm${slot}-domains.txt"
+            rm -f "/etc/squid/acls/vm-${slot}.conf"
+
+            # Remove state
+            rm -rf "${vm_dir}"
+            ((cleaned++))
+        fi
+    done
+
+    # Regenerate combined Squid allowlist
+    if ls /etc/squid/acls/vm*-domains.txt &>/dev/null 2>&1; then
+        cat /etc/squid/acls/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sort -u \
+            > /etc/squid/acls/all-allowed-domains.txt
+    else
+        echo "# No VMs running" > /etc/squid/acls/all-allowed-domains.txt
+    fi
+    squid -k reconfigure 2>/dev/null || true
+
+    log_ok "Cleaned up ${cleaned} stopped VM(s)."
+}
+
+cmd_help() {
+    cat <<'HELP'
+sandbox-ctl — Firecracker Agent Sandbox Manager
+
+Usage: sandbox-ctl <command> [options]
+
+Setup & Build:
+  setup                    Install deps, fetch kernel, configure host network
+  build-base               Build the base Ubuntu+XFCE rootfs image
+  build-agent <type>       Build an agent-specific rootfs from base
+  build-all                Build base + all agent rootfs images
+
+VM Management:
+  launch <type> [opts]     Launch a new VM (--name, --vcpus, --mem)
+  stop <id|name|type>      Stop a running VM
+  stop-all                 Stop all running VMs
+  status [--html]          List VMs with status info
+  cleanup                  Remove stopped VM state
+
+Access:
+  vnc <id|name|type>       Print noVNC URL for a VM
+  logs <id|name|type>      Tail a VM's serial console log
+  ssh <id|name|type>       SSH into a VM
+
+Info:
+  list-agents              Show available agent types
+  network-status           Show TAP devices, nftables, Squid status
+  help                     Show this help message
+
+Examples:
+  sudo sandbox-ctl setup
+  sudo sandbox-ctl build-all
+  sudo sandbox-ctl launch debugger
+  sudo sandbox-ctl launch researcher --vcpus 2 --mem 4096
+  sandbox-ctl status
+  sandbox-ctl vnc debugger
+  sudo sandbox-ctl stop-all
+HELP
+}
+
+# --- Main dispatcher ---
+COMMAND="${1:-help}"
+shift 2>/dev/null || true
+
+case "${COMMAND}" in
+    setup)          cmd_setup "$@" ;;
+    build-base)     cmd_build_base "$@" ;;
+    build-agent)    cmd_build_agent "$@" ;;
+    build-all)      cmd_build_all "$@" ;;
+    launch)         cmd_launch "$@" ;;
+    stop)           cmd_stop "$@" ;;
+    stop-all)       cmd_stop_all "$@" ;;
+    status)         cmd_status "$@" ;;
+    vnc)            cmd_vnc "$@" ;;
+    logs)           cmd_logs "$@" ;;
+    ssh)            cmd_ssh "$@" ;;
+    list-agents)    cmd_list_agents "$@" ;;
+    network-status) cmd_network_status "$@" ;;
+    cleanup)        cmd_cleanup "$@" ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        log_error "Unknown command: ${COMMAND}"
+        cmd_help
+        exit 1
+        ;;
+esac

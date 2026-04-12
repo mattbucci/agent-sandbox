@@ -1,0 +1,14 @@
+# Feature Dev Agent — Allowed Domains
+.github.com
+.githubusercontent.com
+.npmjs.org
+.npmjs.com
+registry.npmjs.org
+.pypi.org
+pypi.org
+files.pythonhosted.org
+.stackoverflow.com
+.stackexchange.com
+.google.com
+.googleapis.com
+deb.nodesource.com

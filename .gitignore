@@ -1,0 +1,18 @@
+# Runtime state
+state/vms/
+state/logs/
+
+# Built artifacts
+kernel/vmlinux
+rootfs/base.ext4
+rootfs/staging/
+rootfs/agents/*/rootfs.ext4
+
+# Secrets
+config/sandbox.conf
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~

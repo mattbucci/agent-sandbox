@@ -1,0 +1,20 @@
+# Researcher Agent — Allowed Domains
+news.ycombinator.com
+hacker-news.firebaseio.com
+.github.com
+.githubusercontent.com
+.reddit.com
+.arxiv.org
+arxiv.org
+.scholar.google.com
+scholar.google.com
+.google.com
+.googleapis.com
+.wikipedia.org
+.medium.com
+.substack.com
+.dev.to
+.hackernoon.com
+.techcrunch.com
+.arstechnica.com
+.theregister.com

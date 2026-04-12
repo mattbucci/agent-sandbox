@@ -1,0 +1,47 @@
+# =============================================================================
+# Agent Sandbox - Global Configuration
+# =============================================================================
+
+# LiteLLM Proxy (OpenAI-compatible API)
+LLM_API_BASE="http://192.168.1.100:4000/v1"
+LLM_API_KEY="sk-your-litellm-key"
+LLM_MODEL="default-model"
+
+# Default VM resources
+DEFAULT_VCPUS=4
+DEFAULT_MEM_MB=8192
+
+# Host network interface (for NAT masquerade)
+HOST_IFACE="enp12s0"
+
+# VM network subnet prefix (VMs get 10.0.{slot}.2/24)
+VM_SUBNET_PREFIX="10.0"
+
+# noVNC base port (VM slot N gets port BASE+N)
+NOVNC_BASE_PORT=6080
+
+# Firecracker binary paths
+FIRECRACKER_BIN="/usr/local/bin/firecracker"
+JAILER_BIN="/usr/local/bin/jailer"
+
+# Kernel path
+KERNEL_PATH="${SANDBOX_ROOT}/kernel/vmlinux"
+
+# Base rootfs image
+BASE_ROOTFS="${SANDBOX_ROOT}/rootfs/base.ext4"
+
+# Rootfs size in MB (sparse)
+ROOTFS_SIZE_MB=8192
+
+# VM serial console log directory
+LOG_DIR="${SANDBOX_ROOT}/state/logs"
+
+# State directory
+STATE_DIR="${SANDBOX_ROOT}/state"
+
+# Squid ports
+SQUID_HTTP_PORT=3128
+SQUID_HTTPS_PORT=3129
+
+# SSH port base (VM slot N gets port BASE+N) for host-side forwarding
+SSH_BASE_PORT=2200

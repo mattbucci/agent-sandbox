@@ -1,0 +1,8 @@
+# Debugger Agent — Allowed Domains
+.sentry.io
+.github.com
+.githubusercontent.com
+.stackoverflow.com
+.stackexchange.com
+.google.com
+.googleapis.com

@@ -1,0 +1,56 @@
+# =============================================================================
+# nftables rules template for Agent Sandbox
+#
+# This file documents the rule structure. Rules are added/removed dynamically
+# by lib/network.sh functions. This file is for reference only.
+#
+# Architecture:
+#   table ip vm_filter {
+#       chain forward   — filter VM ↔ internet traffic (default drop)
+#       chain prerouting — DNAT VM traffic to Squid proxy
+#       chain postrouting — masquerade for outbound
+#   }
+#
+# Per-VM rules (added by add_vm_network):
+#   1. DNAT TCP 80/443 from VM's TAP → Squid ports on host
+#   2. Allow VM → host DNS (UDP 53) and Squid (TCP 3128/3129)
+#   3. Allow VM → LiteLLM server (direct, bypasses Squid)
+#   4. Allow Squid → internet (established/related handles return traffic)
+#
+# Security:
+#   - VMs cannot reach each other (separate /24 subnets, no cross-TAP rules)
+#   - VMs cannot reach internet directly (only via Squid)
+#   - VMs can only reach Squid, DNS, and LiteLLM on the host
+# =============================================================================
+
+# Base table (created by setup-host-network.sh):
+#
+# table ip vm_filter {
+#     chain forward {
+#         type filter hook forward priority 0; policy drop;
+#         ct state established,related accept
+#     }
+#     chain prerouting {
+#         type nat hook prerouting priority -100;
+#     }
+#     chain postrouting {
+#         type nat hook postrouting priority 100;
+#         oifname "HOST_IFACE" masquerade
+#     }
+# }
+
+# Per-VM rules (example for slot 0):
+#
+# # Transparent proxy redirect
+# nft add rule ip vm_filter prerouting iifname "tap-vm0" tcp dport 443 dnat to 10.0.0.1:3129
+# nft add rule ip vm_filter prerouting iifname "tap-vm0" tcp dport 80 dnat to 10.0.0.1:3128
+#
+# # Allow VM → host services
+# nft add rule ip vm_filter forward iifname "tap-vm0" ip daddr 10.0.0.1 tcp dport {3128,3129} accept
+# nft add rule ip vm_filter forward iifname "tap-vm0" ip daddr 10.0.0.1 udp dport 53 accept
+#
+# # Allow VM → LiteLLM server (direct)
+# nft add rule ip vm_filter forward iifname "tap-vm0" ip daddr LLM_HOST_IP tcp dport LLM_PORT accept
+#
+# # Allow Squid outbound on behalf of this VM
+# nft add rule ip vm_filter forward oifname "HOST_IFACE" ct state new,established accept

@@ -1,0 +1,19 @@
+# Security Agent — Allowed Domains
+nvd.nist.gov
+.nist.gov
+.cve.org
+cve.mitre.org
+.github.com
+.githubusercontent.com
+security-tracker.debian.org
+.osv.dev
+osv.dev
+.snyk.io
+.aquasec.com
+raw.githubusercontent.com
+.google.com
+.googleapis.com
+.npmjs.org
+registry.npmjs.org
+pypi.org
+files.pythonhosted.org

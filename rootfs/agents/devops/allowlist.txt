@@ -1,0 +1,18 @@
+# DevOps Agent — Allowed Domains
+.github.com
+.githubusercontent.com
+registry.terraform.io
+releases.hashicorp.com
+apt.releases.hashicorp.com
+.kubernetes.io
+pkgs.k8s.io
+.helm.sh
+.docker.io
+.docker.com
+registry-1.docker.io
+production.cloudflare.docker.com
+.amazonaws.com
+.cloud.google.com
+.azure.com
+.google.com
+.googleapis.com

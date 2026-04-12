@@ -1,0 +1,123 @@
+#!/bin/sh
+# agent-init: Custom PID 1 for Firecracker agent VMs
+# Replaces systemd — Firecracker doesn't support it well.
+# This script runs as init (PID 1) and must never exit.
+
+# Parse kernel command line for our custom parameters
+parse_cmdline() {
+    for param in $(cat /proc/cmdline); do
+        case "${param}" in
+            VM_IP=*)       VM_IP="${param#VM_IP=}" ;;
+            GATEWAY_IP=*)  GATEWAY_IP="${param#GATEWAY_IP=}" ;;
+            DNS_IP=*)      DNS_IP="${param#DNS_IP=}" ;;
+            HOSTNAME=*)    VM_HOSTNAME="${param#HOSTNAME=}" ;;
+        esac
+    done
+}
+
+log() {
+    echo "[agent-init] $*"
+}
+
+# --- Mount essential filesystems ---
+log "Mounting filesystems..."
+mount -t proc     proc     /proc
+mount -t sysfs    sys      /sys
+mount -t devtmpfs dev      /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts   devpts   /dev/pts
+mount -t tmpfs    tmpfs    /dev/shm
+mount -t tmpfs    tmpfs    /tmp  -o size=2G,mode=1777
+mount -t tmpfs    tmpfs    /run  -o size=512M,mode=755
+
+# --- Parse boot parameters ---
+parse_cmdline
+VM_IP="${VM_IP:-10.0.0.2}"
+GATEWAY_IP="${GATEWAY_IP:-10.0.0.1}"
+DNS_IP="${DNS_IP:-10.0.0.1}"
+VM_HOSTNAME="${VM_HOSTNAME:-agent-vm}"
+
+# --- Set hostname ---
+hostname "${VM_HOSTNAME}"
+echo "${VM_HOSTNAME}" > /etc/hostname
+echo "127.0.0.1 localhost ${VM_HOSTNAME}" > /etc/hosts
+
+log "Hostname: ${VM_HOSTNAME}"
+
+# --- Configure network ---
+log "Configuring network: ${VM_IP} gw ${GATEWAY_IP} dns ${DNS_IP}"
+ip addr add "${VM_IP}/24" dev eth0
+ip link set eth0 up
+ip link set lo up
+ip route add default via "${GATEWAY_IP}"
+echo "nameserver ${DNS_IP}" > /etc/resolv.conf
+
+# Test connectivity (non-blocking)
+log "Network configured."
+
+# --- Start dbus (required by XFCE) ---
+log "Starting dbus..."
+mkdir -p /run/dbus
+dbus-daemon --system --fork 2>/dev/null || log "WARNING: dbus failed to start"
+
+# --- Start virtual framebuffer ---
+log "Starting Xvfb on :1 (1920x1080x24)..."
+Xvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+XVFB_PID=$!
+sleep 2
+
+if ! kill -0 ${XVFB_PID} 2>/dev/null; then
+    log "ERROR: Xvfb failed to start"
+else
+    log "Xvfb running (PID ${XVFB_PID})"
+fi
+
+export DISPLAY=:1
+
+# --- Start VNC server ---
+log "Starting x11vnc on port 5900..."
+x11vnc -display :1 -forever -shared -rfbport 5900 -nopw -bg -o /var/log/x11vnc.log 2>/dev/null
+log "VNC server running on port 5900"
+
+# --- Start XFCE desktop ---
+log "Starting XFCE4 desktop..."
+su - agent -c "DISPLAY=:1 DBUS_SESSION_BUS_ADDRESS=autolaunch: startxfce4" &
+sleep 3
+log "XFCE4 started"
+
+# --- Load agent configuration ---
+AGENT_CONF="/etc/agent.conf"
+if [[ -f "${AGENT_CONF}" ]]; then
+    log "Loading agent configuration from ${AGENT_CONF}"
+    . "${AGENT_CONF}"
+else
+    log "WARNING: No agent configuration found at ${AGENT_CONF}"
+fi
+
+# --- Start the agent process ---
+if [[ -f /opt/agent/start.sh ]]; then
+    log "Starting agent process..."
+    su - agent -c "DISPLAY=:1 /opt/agent/start.sh" &
+    AGENT_PID=$!
+    log "Agent started (PID ${AGENT_PID})"
+else
+    log "WARNING: No agent start script found at /opt/agent/start.sh"
+fi
+
+# --- Start SSH server (for debugging) ---
+if command -v sshd >/dev/null 2>&1; then
+    mkdir -p /run/sshd
+    /usr/sbin/sshd -D &
+    log "SSH server started"
+fi
+
+# --- PID 1 main loop: reap zombies ---
+log "Init complete. Agent VM is ready."
+log "VNC: connect to port 5900"
+log "---"
+
+# Reap zombie processes (PID 1 responsibility)
+while true; do
+    wait -n 2>/dev/null || true
+    sleep 1
+done

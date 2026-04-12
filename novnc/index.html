@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Sandbox Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            background: #0d1117; color: #c9d1d9;
+            padding: 2rem;
+        }
+        h1 { color: #58a6ff; margin-bottom: 1.5rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1rem;
+        }
+        .card {
+            background: #161b22; border: 1px solid #30363d;
+            border-radius: 8px; padding: 1.5rem;
+            transition: border-color 0.2s;
+        }
+        .card:hover { border-color: #58a6ff; }
+        .card h2 { color: #58a6ff; font-size: 1.1rem; margin-bottom: 0.5rem; }
+        .card .type { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; }
+        .card .info { font-size: 0.85rem; margin-bottom: 0.5rem; }
+        .card .info span { color: #8b949e; }
+        .card a {
+            display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
+            background: #238636; color: #fff; text-decoration: none;
+            border-radius: 4px; font-size: 0.85rem;
+        }
+        .card a:hover { background: #2ea043; }
+        .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .status.running { background: #3fb950; }
+        .status.stopped { background: #f85149; }
+        .refresh { color: #58a6ff; cursor: pointer; font-size: 0.85rem; margin-left: 1rem; }
+        #vms { margin-top: 1rem; }
+        .empty { color: #8b949e; padding: 2rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Agent Sandbox Dashboard
+        <span class="refresh" onclick="loadVMs()">refresh</span>
+    </h1>
+    <div id="vms" class="grid">
+        <div class="empty">Loading VMs...</div>
+    </div>
+
+    <script>
+        // This page is served statically. VM info is embedded by sandbox-ctl status --html
+        // or loaded from a simple JSON endpoint if available.
+        // For now, this is a template — sandbox-ctl generates the actual page.
+
+        const VMS = __VM_DATA__;
+
+        function renderVMs(vms) {
+            const container = document.getElementById('vms');
+            if (!vms || vms.length === 0) {
+                container.innerHTML = '<div class="empty">No VMs running. Launch one with: sandbox-ctl launch &lt;type&gt;</div>';
+                return;
+            }
+            container.innerHTML = vms.map(vm => `
+                <div class="card">
+                    <h2><span class="status running"></span>${vm.name}</h2>
+                    <div class="type">${vm.agent_type}</div>
+                    <div class="info"><span>IP:</span> ${vm.vm_ip}</div>
+                    <div class="info"><span>Resources:</span> ${vm.vcpus} vCPUs, ${vm.mem_mb}MB RAM</div>
+                    <div class="info"><span>Started:</span> ${vm.started_at}</div>
+                    <a href="http://${location.hostname}:${vm.novnc_port}/vnc.html?autoconnect=true" target="_blank">
+                        Open Desktop
+                    </a>
+                </div>
+            `).join('');
+        }
+
+        function loadVMs() {
+            renderVMs(VMS);
+        }
+
+        loadVMs();
+    </script>
+</body>
+</html>
