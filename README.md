@@ -190,6 +190,35 @@ development mode with raw firecracker:
 sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent
 ```
 
+### Reboot persistence & optional hardening
+
+`bin/sandbox-ctl setup` applies host networking at runtime; it does **not**
+survive a reboot on its own. Enable the bundled service so nftables/Squid/dnsmasq
+(and any running VMs) are restored on boot:
+
+```bash
+sudo cp bin/agent-sandbox.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable agent-sandbox.service
+```
+
+`harden-host.sh` also flags **SMT/hyperthreading** as a side-channel risk for
+multi-tenant isolation. Disabling it persistently is a kernel-cmdline change
+(reboot required). With systemd-boot + `kernel-install` (BLS entries), add the
+options to `/etc/kernel/cmdline` so they survive kernel updates, then to the
+active boot entry. Tip: leave the **`-fallback`** entry unmodified so it remains
+a clean recovery path (SMT on, verbose):
+
+```bash
+# persist for future kernel-install regens
+echo "$(cat /etc/kernel/cmdline) nosmt quiet loglevel=1" | sudo tee /etc/kernel/cmdline
+# apply to the current main entry (not the fallback)
+sudo sed -i '/^options/ s/$/ nosmt quiet loglevel=1/' \
+  /efi/loader/entries/<machine-id>-<version>.conf
+```
+
+> `nosmt` halves available vCPUs. It is defense-in-depth, **not** required for
+> the sandbox or Docker to function.
+
 ### Running Docker inside a sandbox
 
 The `docker` capability installs Docker Engine + Compose v2 and switches the
