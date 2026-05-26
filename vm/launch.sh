@@ -162,7 +162,7 @@ if [[ ${USE_JAILER} -eq 1 ]]; then
         --uid "${JAIL_UID}" \
         --gid "${JAIL_GID}" \
         --chroot-base-dir "${JAILER_DIR}" \
-        --netns "/var/run/netns/default" \
+        --cgroup-version 2 \
         -- \
         --config-file "${FC_CONFIG}" \
         &>"${LOG_FILE}.stdout" &

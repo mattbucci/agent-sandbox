@@ -152,3 +152,88 @@ Testing:    integration-test.sh, security-test.sh, supply-chain-test.sh,
 - Linux x86_64 with KVM (`/dev/kvm`)
 - ~60GB RAM for 5 VMs (configurable per-agent)
 - Python 3 + PyYAML on host
+
+### Host packages
+
+`bin/sandbox-ctl setup` installs most dependencies, but the base-image build and
+host networking need these present first:
+
+| Tool | Debian/Ubuntu | Fedora/RHEL | Arch |
+|------|---------------|-------------|------|
+| debootstrap (build rootfs) | `debootstrap` | `debootstrap` | `debootstrap` + `ubuntu-keyring` |
+| squid / dnsmasq / nftables | `squid dnsmasq nftables` | same | `squid dnsmasq nftables` |
+| websockify (noVNC) | `python3-websockify` | `python3-websockify` | AUR, or a venv: `python -m venv /opt/novnc-venv && /opt/novnc-venv/bin/pip install websockify` |
+| ssh client w/ password (testing) | `sshpass` | `sshpass` | `sshpass` |
+
+Also required on the host: `rsync`, `mkfs.ext4` (e2fsprogs), `curl`, `openssl`, `jq`.
+
+### firewalld coexistence
+
+If the host runs **firewalld** (default on Fedora/RHEL, common on Arch), its
+input chain rejects VM→gateway traffic (DNS, Squid, OTel) before `vm_filter`'s
+allow rules are evaluated — nftables enforces *all* tables. Put the VM subnet
+range in the trusted zone so the sandbox's own `vm_filter` table remains the
+egress authority:
+
+```bash
+sudo firewall-cmd --permanent --zone=trusted --add-source=10.0.0.0/16
+sudo firewall-cmd --reload
+```
+
+### jailer vs. raw firecracker
+
+Production launches use the Firecracker **jailer** (chroot + dropped privileges).
+If the jailer chroot/config staging is not set up for your host, launch in
+development mode with raw firecracker:
+
+```bash
+sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent
+```
+
+### Reboot persistence & optional hardening
+
+`bin/sandbox-ctl setup` applies host networking at runtime; it does **not**
+survive a reboot on its own. Enable the bundled service so nftables/Squid/dnsmasq
+(and any running VMs) are restored on boot:
+
+```bash
+sudo cp bin/agent-sandbox.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable agent-sandbox.service
+```
+
+`harden-host.sh` also flags **SMT/hyperthreading** as a side-channel risk for
+multi-tenant isolation. Disabling it persistently is a kernel-cmdline change
+(reboot required). With systemd-boot + `kernel-install` (BLS entries), add the
+options to `/etc/kernel/cmdline` so they survive kernel updates, then to the
+active boot entry. Tip: leave the **`-fallback`** entry unmodified so it remains
+a clean recovery path (SMT on, verbose):
+
+```bash
+# persist for future kernel-install regens
+echo "$(cat /etc/kernel/cmdline) nosmt quiet loglevel=1" | sudo tee /etc/kernel/cmdline
+# apply to the current main entry (not the fallback)
+sudo sed -i '/^options/ s/$/ nosmt quiet loglevel=1/' \
+  /efi/loader/entries/<machine-id>-<version>.conf
+```
+
+> `nosmt` halves available vCPUs. It is defense-in-depth, **not** required for
+> the sandbox or Docker to function.
+
+### Running Docker inside a sandbox
+
+The `docker` capability installs Docker Engine + Compose v2 and switches the
+guest to the **iptables-legacy** backend (the stock guest kernel has
+`CONFIG_IP_NF_IPTABLES` but not `CONFIG_NF_TABLES`). Docker + Compose run inside
+the VM (overlay2, cgroup v2). Two caveats with the **stock Firecracker CI guest
+kernel** (`vmlinux-6.1.x`):
+
+- **Bridge networking / port publishing** needs `CONFIG_IP_NF_RAW` (Docker ≥28's
+  default bridge driver adds a `raw`-table rule). The CI kernel lacks it. Either
+  supply a guest kernel built with `IP_NF_RAW` (+ `NF_TABLES`), or set
+  `"iptables": false` in the VM's `/etc/docker/daemon.json` to run containers
+  without docker-managed bridge NAT (use `--network host`/`none`, or a
+  user-defined bridge for container-to-container).
+- **Pulling images requires the Squid egress filter to splice the registry's
+  TLS.** Squid 7.x peek-and-splice has been observed to bump (MITM) some
+  allowlisted hosts; if pulls fail with TLS `unknown CA`, pin Squid 6.x or adjust
+  the `ssl_bump` config in `network/squid/squid-base.conf`.

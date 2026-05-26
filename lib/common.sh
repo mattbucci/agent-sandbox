@@ -3,6 +3,14 @@
 # lib/common.sh — Shared functions for agent-sandbox
 # =============================================================================
 
+# Ensure sbin dirs are on PATH. Under `sudo` with a restrictive secure_path
+# (common on Arch), /usr/sbin may be absent, which breaks chroot commands like
+# locale-gen and useradd that live in /usr/sbin inside the (Debian/Ubuntu) guest.
+case ":${PATH}:" in
+    *:/usr/sbin:*) ;;
+    *) export PATH="${PATH}:/usr/local/sbin:/usr/sbin:/sbin" ;;
+esac
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
