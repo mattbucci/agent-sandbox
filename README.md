@@ -171,14 +171,20 @@ Also required on the host: `rsync`, `mkfs.ext4` (e2fsprogs), `curl`, `openssl`, 
 
 If the host runs **firewalld** (default on Fedora/RHEL, common on Arch), its
 input chain rejects VM→gateway traffic (DNS, Squid, OTel) before `vm_filter`'s
-allow rules are evaluated — nftables enforces *all* tables. Put the VM subnet
-range in the trusted zone so the sandbox's own `vm_filter` table remains the
-egress authority:
+allow rules are evaluated — nftables enforces *all* tables. Stop firewalld from
+rejecting the VM subnet so the sandbox's own `vm_filter` table is the authority:
 
 ```bash
 sudo firewall-cmd --permanent --zone=trusted --add-source=10.0.0.0/16
 sudo firewall-cmd --reload
 ```
+
+This does **not** expose the host: `vm_filter`'s `input` chain (set up by
+`setup-host-network.sh`) is the real VM→host control — it permits a VM to reach
+only Squid (3128/3129), DNS (53) and OTel (4317/4318) on the gateway and
+**drops everything else**, so an agent inside a VM cannot reach host SSH or any
+other local service. Verify with, from inside a VM:
+`echo > /dev/tcp/<gateway>/22` (should hang/fail) vs `…/3129` (should connect).
 
 ### jailer vs. raw firecracker
 

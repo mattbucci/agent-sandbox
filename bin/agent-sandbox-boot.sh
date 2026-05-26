@@ -34,6 +34,16 @@ HOST_IFACE="${HOST_IFACE:-enp12s0}"
 
 nft -f - <<NFT
 table ip vm_filter {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        # VMs reach ONLY Squid/DNS/OTel on the host; drop everything else.
+        iifname "tap-vm*" ct state established,related accept
+        iifname "tap-vm*" udp dport 53 accept
+        iifname "tap-vm*" tcp dport { 3128, 3129 } accept
+        iifname "tap-vm*" tcp dport { 4317, 4318 } accept
+        iifname "tap-vm*" drop
+    }
+
     chain forward {
         type filter hook forward priority 0; policy drop;
         ct state established,related accept

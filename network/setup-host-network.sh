@@ -83,8 +83,14 @@ table ip vm_filter {
     chain input {
         type filter hook input priority 0; policy accept;
 
-        # Block VMs from reaching host SSH
-        iifname "tap-vm*" tcp dport 22 drop comment "block-vm-to-host-ssh"
+        # VMs may reach ONLY Squid/DNS/OTel on the host gateway; everything else
+        # (host SSH, and any other local service the host happens to run) is
+        # dropped — no pivot from inside the sandbox to the host.
+        iifname "tap-vm*" ct state established,related accept
+        iifname "tap-vm*" udp dport 53 accept comment "vm-dns"
+        iifname "tap-vm*" tcp dport { 3128, 3129 } accept comment "vm-squid"
+        iifname "tap-vm*" tcp dport { 4317, 4318 } accept comment "vm-otel"
+        iifname "tap-vm*" drop comment "vm-drop-host"
     }
 
     chain forward {
