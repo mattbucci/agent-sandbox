@@ -234,17 +234,14 @@ kernel** (`vmlinux-6.1.x`):
   `"iptables": false` in the VM's `/etc/docker/daemon.json` to run containers
   without docker-managed bridge NAT (use `--network host`/`none`, or a
   user-defined bridge for container-to-container).
-- **Pulling images requires the Squid egress filter to splice the registry's
-  TLS.** Two distinct things here:
-  - *Overlapping allowlist entries are invalid.* Squid rejects an
-    `ssl::server_name` list that contains both a parent (`.docker.com`) and a
-    child (`production.cloudflare.docker.com`) — 6.x fails fatally, 7.x mis-matches
-    the parent. `gen-acl.sh` now de-duplicates the generated lists, so this is
-    handled automatically.
-  - *Known open issue:* even with a clean allowlist, peek-and-splice splices some
-    origins (GitHub, AWS-hosted registries) but client-first **bumps** others
-    (observed with Cloudflare/Google/Fastly-fronted hosts such as
-    `auth.docker.io`, `www.google.com`), independent of Squid version (reproduced
-    on 6.14 and 7.5). Bumped hosts fail with TLS `unknown CA`. Under
-    investigation — affects pulling images whose auth/registry hosts sit on those
-    CDNs.
+- **Per-VM HTTPS filtering is enforced in `ssl_bump`, not `http_access`.** Squid
+  peeks the ClientHello at step1; the splice/terminate decision happens at step2
+  where the SNI is reliably available. Putting the `ssl::server_name` allow rule
+  in `http_access` (as earlier versions did) is racy — `http_access` runs before
+  the peek completes on some connections, matches the destination *IP*, denies,
+  and client-first **bumps** the connection, so allowlisted HTTPS hosts fail with
+  TLS `unknown CA`. `gen-acl.sh` therefore emits `ssl_bump splice vmN_src
+  vmN_domains` rules (included between `peek step1` and `terminate all`).
+- **Allowlists are de-duplicated.** Squid rejects overlapping `ssl::server_name`
+  entries (both `.docker.com` and `production.cloudflare.docker.com`): 6.x fails
+  fatally, 7.x mis-matches the parent. `gen-acl.sh` drops covered entries.

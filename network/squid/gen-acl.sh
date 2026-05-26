@@ -75,14 +75,16 @@ fi
 } > "${DOMAINS_FILE}"
 
 # --- Generate Squid ACL config for this VM ---
+# Per-VM HTTPS filtering is done in ssl_bump (step2, after the SNI is peeked) —
+# NOT in http_access, which runs before the peek and would match the dest IP,
+# deny, and trigger a client-first bump. This file is included inside the
+# ssl_bump block in squid-base.conf, between `peek step1` and `terminate all`.
 cat > "${CONF_FILE}" <<EOF
 # VM Slot ${SLOT}: ${AGENT_TYPE}
 # Source subnet: ${SUBNET}
 acl vm${SLOT}_src src ${SUBNET}
 acl vm${SLOT}_domains ssl::server_name "${DOMAINS_FILE}"
-acl vm${SLOT}_http_domains dstdomain "${DOMAINS_FILE}"
-http_access allow vm${SLOT}_src vm${SLOT}_http_domains
-http_access allow CONNECT vm${SLOT}_src vm${SLOT}_domains
+ssl_bump splice vm${SLOT}_src vm${SLOT}_domains
 EOF
 
 # --- Regenerate combined include file (all per-VM confs) ---
