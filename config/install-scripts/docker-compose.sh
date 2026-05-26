@@ -41,13 +41,14 @@ ln -sf /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-co
 # PATH (agent-init starts dockerd as PID-1 child with a minimal PATH, so the
 # proxy binary in /usr/bin would not be found otherwise).
 #
-# NOTE: the stock Firecracker CI guest kernel (6.1.x) is built WITHOUT
-# CONFIG_IP_NF_RAW and CONFIG_NF_TABLES. Docker >=28 needs the iptables `raw`
-# table for its default bridge driver, so on that kernel the bridge fails with
-# "can't initialize iptables table raw". Until a guest kernel with IP_NF_RAW
-# (+ NF_TABLES) is used, add  "iptables": false  here to run containers without
-# docker-managed bridge NAT/port-publishing (use --network host/none, or a
-# user-defined bridge for container-to-container).
+# NOTE on the guest kernel: Docker >=28's default bridge driver needs the
+# iptables `raw` table (CONFIG_IP_NF_RAW), which the stock Firecracker CI kernel
+# (fetch-kernel.sh) lacks -> bridge fails with "can't initialize iptables table
+# raw". Build the docker-capable guest kernel with `kernel/build-kernel.sh`
+# (adds IP_NF_RAW + NF_TABLES); then the default bridge + port publishing work
+# and no extra options are needed here. If you must run on the stock kernel, add
+# "iptables": false (containers run, but no bridge NAT / port-publishing —
+# use --network host/none, or a user-defined bridge for container-to-container).
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'JSON'
 {

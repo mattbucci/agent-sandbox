@@ -19,3 +19,5 @@ config/secrets/
 *.swp
 *.swo
 *~
+kernel/vmlinux.fcci.bak
+kernel/vmlinux.clang

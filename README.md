@@ -222,18 +222,24 @@ sudo sed -i '/^options/ s/$/ nosmt quiet loglevel=1/' \
 
 ### Running Docker inside a sandbox
 
-The `docker` capability installs Docker Engine + Compose v2 and switches the
-guest to the **iptables-legacy** backend (the stock guest kernel has
-`CONFIG_IP_NF_IPTABLES` but not `CONFIG_NF_TABLES`). Docker + Compose run inside
-the VM (overlay2, cgroup v2). Two caveats with the **stock Firecracker CI guest
-kernel** (`vmlinux-6.1.x`):
+The `docker` capability installs Docker Engine + Compose v2. Docker + Compose run
+inside the VM (overlay2, cgroup v2). Networking depends on the guest kernel:
 
-- **Bridge networking / port publishing** needs `CONFIG_IP_NF_RAW` (Docker ≥28's
-  default bridge driver adds a `raw`-table rule). The CI kernel lacks it. Either
-  supply a guest kernel built with `IP_NF_RAW` (+ `NF_TABLES`), or set
-  `"iptables": false` in the VM's `/etc/docker/daemon.json` to run containers
-  without docker-managed bridge NAT (use `--network host`/`none`, or a
-  user-defined bridge for container-to-container).
+- **Use `kernel/build-kernel.sh` for full Docker networking.** Docker ≥28's
+  default bridge driver needs the iptables `raw` table (`CONFIG_IP_NF_RAW`),
+  which the stock CI kernel (`fetch-kernel.sh`) omits. `build-kernel.sh` rebuilds
+  the Firecracker guest kernel with `IP_NF_RAW` + `NF_TABLES` (+ the iptables-nft
+  `NFT_COMPAT`) on top of the CI config, giving working `docker0` bridge, port
+  publishing, and container egress NAT — verified end-to-end. It builds with
+  clang/LLVM (Arch's bleeding-edge gcc miscompiles 6.1) and bakes `acpi=off` +
+  `VIRTIO_MMIO_CMDLINE_DEVICES` into the kernel (a from-source vanilla kernel
+  can't parse Firecracker's ACPI tables — the stock CI kernel carries FC patches
+  — so it discovers devices from the `virtio_mmio.device=` boot args instead).
+  This is transparent to `config-template.json`, which stays compatible with both
+  kernels.
+- **On the stock CI kernel**, the bridge fails ("can't initialize iptables table
+  `raw`"); set `"iptables": false` in `/etc/docker/daemon.json` to run containers
+  without bridge NAT/port-publishing (use `--network host`/`none`).
 - **Per-VM HTTPS filtering is enforced in `ssl_bump`, not `http_access`.** Squid
   peeks the ClientHello at step1; the splice/terminate decision happens at step2
   where the SNI is reliably available. Putting the `ssl::server_name` allow rule
