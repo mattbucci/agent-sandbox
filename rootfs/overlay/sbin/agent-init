@@ -31,6 +31,10 @@ mount -t tmpfs    tmpfs    /dev/shm
 mount -t tmpfs    tmpfs    /tmp  -o size=2G,mode=1777
 mount -t tmpfs    tmpfs    /run  -o size=512M,mode=755
 
+# cgroup v2 unified hierarchy — required by dockerd (no systemd to mount it)
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || log "WARNING: cgroup2 mount failed"
+
 # --- Parse boot parameters ---
 parse_cmdline
 VM_IP="${VM_IP:-10.0.0.2}"
@@ -52,6 +56,9 @@ ip addr add "${VM_IP}/24" dev eth0
 ip link set eth0 up
 ip link set lo up
 ip route add default via "${GATEWAY_IP}"
+# /etc/resolv.conf ships as a dangling symlink (systemd-resolved stub) — replace
+# it with a real file or the write fails with "Directory nonexistent".
+rm -f /etc/resolv.conf
 echo "nameserver ${DNS_IP}" > /etc/resolv.conf
 
 # Test connectivity (non-blocking)
@@ -113,6 +120,26 @@ if command -v sshd >/dev/null 2>&1; then
     mkdir -p /run/sshd
     /usr/sbin/sshd -D &
     log "SSH server started"
+fi
+
+# --- Start Docker daemon (if the docker capability was installed) ---
+if command -v dockerd >/dev/null 2>&1; then
+    log "Starting dockerd..."
+    # PID 1 has a minimal PATH; give dockerd the full one so it can find
+    # docker-proxy, iptables, modprobe, etc.
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    dockerd >/var/log/dockerd.log 2>&1 &
+    i=0
+    while [ "${i}" -lt 15 ]; do
+        [ -S /var/run/docker.sock ] && break
+        i=$((i + 1))
+        sleep 1
+    done
+    if [ -S /var/run/docker.sock ]; then
+        log "dockerd started"
+    else
+        log "WARNING: dockerd did not create its socket (see /var/log/dockerd.log)"
+    fi
 fi
 
 # --- PID 1 main loop: reap zombies ---

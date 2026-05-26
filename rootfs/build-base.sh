@@ -113,7 +113,8 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     sudo iproute2 iputils-ping net-tools curl wget ca-certificates \
     openssh-server dbus dbus-x11 procps less vim nano \
-    git jq unzip tar gzip bzip2
+    git jq unzip tar gzip bzip2 \
+    software-properties-common gnupg   # provides add-apt-repository (deadsnakes PPA)
 
 # XFCE desktop environment
 apt-get install -y --no-install-recommends \
@@ -279,7 +280,13 @@ MOUNT_POINT=$(mktemp -d)
 mount -o loop "${ROOTFS_IMG}" "${MOUNT_POINT}"
 
 echo "Copying rootfs to image..."
-rsync -aHAX --info=progress2 "${STAGING}/" "${MOUNT_POINT}/"
+# Exclude pseudo-filesystems — they are still bind-mounted in STAGING at this
+# point, and copying /proc/kcore (appears as all of RAM) would instantly fill
+# the image. The mount-point directories themselves are preserved.
+rsync -aHAX --info=progress2 \
+    --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
+    --exclude='/tmp/*'  --exclude='/run/*' \
+    "${STAGING}/" "${MOUNT_POINT}/"
 
 # Cleanup the staging mount artifacts
 rm -rf "${MOUNT_POINT}/tmp/"*

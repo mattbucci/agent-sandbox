@@ -46,13 +46,30 @@ install_pkg() {
             dnf install -y "${pkg}" >/dev/null 2>&1
         elif command -v apt-get &>/dev/null; then
             apt-get install -y "${pkg}" >/dev/null 2>&1
+        elif command -v pacman &>/dev/null; then
+            pacman -S --noconfirm --needed "${pkg}" >/dev/null 2>&1
         fi
     fi
 }
 
-install_pkg nftables
-install_pkg squid
-install_pkg dnsmasq
+# pkg name may differ from the binary name (e.g. on Arch the binary is `nft`).
+ensure_cmd() {
+    local cmd="$1" pkg="$2"
+    if ! command -v "${cmd}" &>/dev/null; then
+        echo "  Installing ${pkg} (provides ${cmd})..."
+        if command -v pacman &>/dev/null; then
+            pacman -S --noconfirm --needed "${pkg}" >/dev/null 2>&1
+        elif command -v dnf &>/dev/null; then
+            dnf install -y "${pkg}" >/dev/null 2>&1
+        elif command -v apt-get &>/dev/null; then
+            apt-get install -y "${pkg}" >/dev/null 2>&1
+        fi
+    fi
+}
+
+ensure_cmd nft   nftables
+ensure_cmd squid squid
+ensure_cmd dnsmasq dnsmasq
 
 # --- 3. nftables base rules ---
 echo "[3/5] Configuring nftables..."
@@ -115,18 +132,35 @@ if [[ ! -f "${SQUID_SSL_DIR}/squid-ca.pem" ]]; then
     chmod 600 "${SQUID_SSL_DIR}"/*.pem
 fi
 
+# Locate security_file_certgen (path differs: /usr/lib64 on RH, /usr/lib on Arch/Debian)
+CERTGEN=""
+for c in /usr/lib64/squid/security_file_certgen /usr/lib/squid/security_file_certgen; do
+    [[ -x "$c" ]] && CERTGEN="$c" && break
+done
+
+# Determine the user Squid runs as (Arch: proxy, Debian/RH: proxy/squid)
+SQUID_USER="proxy"
+id squid &>/dev/null && SQUID_USER="squid"
+
 # Initialize Squid SSL database
-if [[ ! -d /var/lib/squid/ssl_db ]]; then
-    /usr/lib64/squid/security_file_certgen -c -s /var/lib/squid/ssl_db -M 64MB 2>/dev/null || \
-    /usr/lib/squid/security_file_certgen -c -s /var/lib/squid/ssl_db -M 64MB 2>/dev/null || true
-    chown -R squid:squid /var/lib/squid/ssl_db 2>/dev/null || true
+mkdir -p /var/lib/squid
+if [[ ! -d /var/lib/squid/ssl_db && -n "$CERTGEN" ]]; then
+    "$CERTGEN" -c -s /var/lib/squid/ssl_db -M 64MB 2>/dev/null || true
+fi
+chown -R "${SQUID_USER}:${SQUID_USER}" /var/lib/squid 2>/dev/null || true
+
+# Install Squid config, rewriting the certgen path to the one we found on this host
+cp "${SCRIPT_DIR}/squid/squid-base.conf" "${SQUID_CONF}"
+if [[ -n "$CERTGEN" ]]; then
+    sed -i "s|^sslcrtd_program .*security_file_certgen|sslcrtd_program ${CERTGEN}|" "${SQUID_CONF}"
 fi
 
-# Install Squid config
-cp "${SCRIPT_DIR}/squid/squid-base.conf" "${SQUID_CONF}"
-
-# Create empty default ACL
-echo "# No VMs running yet" > "${SQUID_ACL_DIR}/default-domains.txt"
+# Create placeholder ACL files so Squid can start before any VM is launched.
+# (squid-base.conf references all-allowed-domains.txt and includes vm-acls.conf)
+[[ -f "${SQUID_ACL_DIR}/all-allowed-domains.txt" ]] || \
+    echo "# No VMs running yet" > "${SQUID_ACL_DIR}/all-allowed-domains.txt"
+[[ -f "${SQUID_ACL_DIR}/vm-acls.conf" ]] || \
+    echo "# No VMs running yet" > "${SQUID_ACL_DIR}/vm-acls.conf"
 
 # Restart Squid
 systemctl enable squid 2>/dev/null || true

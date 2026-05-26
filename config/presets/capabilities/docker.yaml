@@ -3,6 +3,10 @@ description: "Container management and runtime"
 packages:
   apt:
     - docker.io
+install_script:
+  - docker-compose.sh
 provides_tools:
   - name: docker
     description: "Container management CLI"
+  - name: docker compose
+    description: "Multi-container orchestration (Compose v2 plugin)"
