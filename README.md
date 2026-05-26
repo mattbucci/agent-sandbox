@@ -182,9 +182,10 @@ sudo firewall-cmd --reload
 
 ### jailer vs. raw firecracker
 
-Production launches use the Firecracker **jailer** (chroot + dropped privileges).
-If the jailer chroot/config staging is not set up for your host, launch in
-development mode with raw firecracker:
+Launches use the Firecracker **jailer** by default (chroot + dropped privileges
++ cgroup v2). `launch.sh` stages the kernel, rootfs, and config into the
+per-VM chroot (`/srv/jailer/firecracker/<id>/root/`) with chroot-relative paths,
+so this works out of the box. For a quick dev launch without the jailer:
 
 ```bash
 sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent

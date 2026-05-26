@@ -138,24 +138,58 @@ if [[ -x "${JAILER_BIN:-/usr/local/bin/jailer}" ]] && [[ "${NO_JAILER:-0}" != "1
 fi
 
 if [[ ${USE_JAILER} -eq 1 ]]; then
-    # Jailer setup: creates chroot, drops privileges, applies seccomp
+    # Jailer chroots Firecracker and runs it with its working directory at the
+    # chroot root, so the kernel, rootfs and config must live INSIDE the chroot
+    # and be referenced by chroot-relative paths (not the host paths in
+    # ${FC_CONFIG}). Stage them here.
     JAILER_DIR="/srv/jailer"
     JAIL_ID="${INSTANCE_ID}"
-    mkdir -p "${JAILER_DIR}"
-
-    # Jailer needs the kernel and rootfs inside its chroot — use hard links
     JAIL_ROOT="${JAILER_DIR}/firecracker/${JAIL_ID}/root"
-    mkdir -p "${JAIL_ROOT}"
-
-    # Create a dedicated uid/gid for this VM (base 10000 + slot)
     JAIL_UID=$((10000 + SLOT))
     JAIL_GID=$((10000 + SLOT))
 
-    # Ensure the user exists (or use numeric uid)
+    # Dedicated unprivileged uid/gid per VM (jailer drops to it)
     id -u "fc-${SLOT}" &>/dev/null 2>&1 || \
         useradd -r -u "${JAIL_UID}" -s /usr/sbin/nologin "fc-${SLOT}" 2>/dev/null || true
 
-    # Hard-link kernel and rootfs into jail (jailer copies them)
+    # Fresh chroot tree (jailer copies the firecracker binary in itself)
+    rm -rf "${JAILER_DIR}/firecracker/${JAIL_ID}"
+    mkdir -p "${JAIL_ROOT}"
+
+    # Kernel: copy in. Rootfs: hard-link (shares the inode with the state copy,
+    # stays read-write), falling back to a copy across filesystems.
+    cp --reflink=auto "${KERNEL_PATH}" "${JAIL_ROOT}/vmlinux"
+    ln -f "${VM_STATE_DIR}/rootfs.ext4" "${JAIL_ROOT}/rootfs.ext4" 2>/dev/null \
+        || cp --reflink=auto "${VM_STATE_DIR}/rootfs.ext4" "${JAIL_ROOT}/rootfs.ext4"
+
+    # Firecracker's own log + metrics live in the chroot. The guest serial
+    # console still goes to the jailer process stdout (${LOG_FILE}.stdout).
+    : > "${JAIL_ROOT}/firecracker.log"
+    : > "${JAIL_ROOT}/metrics"
+
+    # Jailer-local config with chroot-relative paths.
+    sed \
+        -e "s|__KERNEL_PATH__|/vmlinux|g" \
+        -e "s|__ROOTFS_PATH__|/rootfs.ext4|g" \
+        -e "s|__VCPUS__|${VCPUS}|g" \
+        -e "s|__MEM_MB__|${MEM_MB}|g" \
+        -e "s|__TAP_NAME__|${TAP_NAME}|g" \
+        -e "s|__GUEST_MAC__|${GUEST_MAC}|g" \
+        -e "s|__VM_IP__|${VM_IP}|g" \
+        -e "s|__GATEWAY_IP__|${GATEWAY_IP}|g" \
+        -e "s|__DNS_IP__|${DNS_IP}|g" \
+        -e "s|__HOSTNAME__|${VM_NAME}|g" \
+        -e "s|__NO_AGENT__|${NO_AGENT}|g" \
+        -e "s|__LOG_PATH__|/firecracker.log|g" \
+        -e "s|__METRICS_PATH__|/metrics|g" \
+        "${SANDBOX_ROOT}/vm/config-template.json" > "${JAIL_ROOT}/vm-config.json"
+
+    # Everything the dropped-privilege process touches must be owned by it.
+    chown -R "${JAIL_UID}:${JAIL_GID}" "${JAILER_DIR}/firecracker/${JAIL_ID}"
+
+    # Jailer creates the API socket inside the chroot; record it for stop.sh.
+    FC_SOCKET="${JAIL_ROOT}/run/firecracker.socket"
+
     ${JAILER_BIN} \
         --id "${JAIL_ID}" \
         --exec-file "${FIRECRACKER_BIN}" \
@@ -164,7 +198,7 @@ if [[ ${USE_JAILER} -eq 1 ]]; then
         --chroot-base-dir "${JAILER_DIR}" \
         --cgroup-version 2 \
         -- \
-        --config-file "${FC_CONFIG}" \
+        --config-file vm-config.json \
         &>"${LOG_FILE}.stdout" &
     FC_PID=$!
 else
