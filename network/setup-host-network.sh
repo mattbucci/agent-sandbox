@@ -70,6 +70,7 @@ ensure_cmd() {
 ensure_cmd nft   nftables
 ensure_cmd squid squid
 ensure_cmd dnsmasq dnsmasq
+ensure_cmd jq    jq        # used host-side by sandbox-ctl + the boot service
 
 # --- 3. nftables base rules ---
 echo "[3/5] Configuring nftables..."
