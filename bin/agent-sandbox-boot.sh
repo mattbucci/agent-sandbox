@@ -68,6 +68,9 @@ if [[ ! -d "${STATE_DIR}/vms" ]]; then
 fi
 
 RESTORED=0
+# VM restore is best-effort: networking (the essential persistence) is already
+# applied above, so a single VM failing to restore must not fail the service.
+set +e
 for info_file in "${STATE_DIR}"/vms/*/info.json; do
     [[ -f "${info_file}" ]] || continue
 
@@ -144,9 +147,10 @@ for info_file in "${STATE_DIR}"/vms/*/info.json; do
     jq --argjson pid "${WS_PID}" '.websockify_pid = $pid' "${info_file}" > "${info_file}.tmp"
     mv "${info_file}.tmp" "${info_file}"
 
-    ((RESTORED++))
+    RESTORED=$((RESTORED + 1))
     log_info "  ${instance_id} restored (FC PID ${FC_PID}, noVNC :${novnc_port})"
 done
+set -e  # re-enable after best-effort restore loop
 
 # Reload Squid with new ACLs
 squid -k reconfigure 2>/dev/null || true
