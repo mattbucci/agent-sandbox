@@ -235,6 +235,16 @@ kernel** (`vmlinux-6.1.x`):
   without docker-managed bridge NAT (use `--network host`/`none`, or a
   user-defined bridge for container-to-container).
 - **Pulling images requires the Squid egress filter to splice the registry's
-  TLS.** Squid 7.x peek-and-splice has been observed to bump (MITM) some
-  allowlisted hosts; if pulls fail with TLS `unknown CA`, pin Squid 6.x or adjust
-  the `ssl_bump` config in `network/squid/squid-base.conf`.
+  TLS.** Two distinct things here:
+  - *Overlapping allowlist entries are invalid.* Squid rejects an
+    `ssl::server_name` list that contains both a parent (`.docker.com`) and a
+    child (`production.cloudflare.docker.com`) — 6.x fails fatally, 7.x mis-matches
+    the parent. `gen-acl.sh` now de-duplicates the generated lists, so this is
+    handled automatically.
+  - *Known open issue:* even with a clean allowlist, peek-and-splice splices some
+    origins (GitHub, AWS-hosted registries) but client-first **bumps** others
+    (observed with Cloudflare/Google/Fastly-fronted hosts such as
+    `auth.docker.io`, `www.google.com`), independent of Squid version (reproduced
+    on 6.14 and 7.5). Bumped hosts fail with TLS `unknown CA`. Under
+    investigation — affects pulling images whose auth/registry hosts sit on those
+    CDNs.

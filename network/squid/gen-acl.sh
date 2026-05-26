@@ -25,6 +25,35 @@ ALLOWLIST_FILE="${3:?Usage: gen-acl.sh <slot> <agent-type> <allowlist-file>}"
 ACL_DIR="/etc/squid/acls"
 mkdir -p "${ACL_DIR}"
 
+# Squid rejects overlapping entries in ssl::server_name / dstdomain ACLs
+# (6.x: FATAL "is a subdomain of"; 7.x: tolerated but mis-matched -> allowlisted
+# HTTPS domains get bumped). Drop any entry already covered by a broader
+# leading-dot entry, e.g. drop "production.cloudflare.docker.com" when
+# ".docker.com" is present, and "scholar.google.com" when ".google.com" is.
+dedupe_domains() {
+    # Reads domain entries on stdin, prints the overlap-free set. Uses `-c` so
+    # stdin stays the piped domains (a `-` + heredoc would consume stdin as the
+    # script and read zero domains).
+    python3 -c '
+import sys
+ents=[]
+for l in sys.stdin:
+    l=l.strip()
+    if l and not l.startswith("#") and l not in ents:
+        ents.append(l)
+def covered(e):
+    for p in ents:
+        if p == e or not p.startswith("."):
+            continue
+        if e == p[1:] or e.endswith(p):   # "google.com" or "*.google.com" vs ".google.com"
+            return True
+    return False
+for e in ents:
+    if not covered(e):
+        print(e)
+'
+}
+
 SUBNET="${VM_SUBNET_PREFIX:-10.0}.${SLOT}.0/24"
 DOMAINS_FILE="${ACL_DIR}/vm${SLOT}-domains.txt"
 CONF_FILE="${ACL_DIR}/vm-${SLOT}.conf"
@@ -35,20 +64,15 @@ if [[ -n "${LLM_API_BASE:-}" ]]; then
     LLM_HOST=$(echo "${LLM_API_BASE}" | sed -E 's|https?://||; s|:[0-9]+.*||; s|/.*||')
 fi
 
-# --- Generate domain list ---
-echo "# Allowed domains for VM slot ${SLOT} (${AGENT_TYPE})" > "${DOMAINS_FILE}"
-echo "# Generated: $(date -Iseconds)" >> "${DOMAINS_FILE}"
-
-# Add domains from allowlist
-if [[ -f "${ALLOWLIST_FILE}" ]]; then
-    # Strip comments and empty lines, add each domain
-    grep -v '^\s*#' "${ALLOWLIST_FILE}" | grep -v '^\s*$' >> "${DOMAINS_FILE}"
-fi
-
-# Always allow LiteLLM host
-if [[ -n "${LLM_HOST}" ]]; then
-    echo "${LLM_HOST}" >> "${DOMAINS_FILE}"
-fi
+# --- Generate domain list (deduped/overlap-free) ---
+{
+    echo "# Allowed domains for VM slot ${SLOT} (${AGENT_TYPE})"
+    echo "# Generated: $(date -Iseconds)"
+    {
+        [[ -f "${ALLOWLIST_FILE}" ]] && grep -v '^\s*#' "${ALLOWLIST_FILE}" | grep -v '^\s*$'
+        [[ -n "${LLM_HOST}" ]] && echo "${LLM_HOST}"
+    } | dedupe_domains
+} > "${DOMAINS_FILE}"
 
 # --- Generate Squid ACL config for this VM ---
 cat > "${CONF_FILE}" <<EOF
@@ -69,10 +93,12 @@ for f in "${ACL_DIR}"/vm-[0-9]*.conf; do
     [[ -f "$f" ]] && cat "$f" >> "${INCLUDE_FILE}"
 done
 
-# --- Regenerate combined allowed domains list ---
-echo "# Combined allowed domains (all VMs)" > "${ACL_DIR}/all-allowed-domains.txt"
-echo "# Generated: $(date -Iseconds)" >> "${ACL_DIR}/all-allowed-domains.txt"
-cat "${ACL_DIR}"/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sort -u \
-    >> "${ACL_DIR}/all-allowed-domains.txt"
+# --- Regenerate combined allowed domains list (deduped/overlap-free) ---
+{
+    echo "# Combined allowed domains (all VMs)"
+    echo "# Generated: $(date -Iseconds)"
+    cat "${ACL_DIR}"/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' \
+        | sort -u | dedupe_domains
+} > "${ACL_DIR}/all-allowed-domains.txt"
 
 echo "ACL generated for VM slot ${SLOT} (${AGENT_TYPE}): ${CONF_FILE}"
