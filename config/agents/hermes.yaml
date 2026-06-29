@@ -1,0 +1,19 @@
+agent:
+  type: hermes
+  name: "Hermes Agent (v2026.6.19)"
+  harness: hermes
+
+vm: {}
+
+egress:
+  # Runtime egress is only the LLM endpoint (simple-llm-router.ph.ca:8080),
+  # reached via the existing nftables LLM passthrough — NOT via Squid.
+  # No domains are routed through the proxy allowlist.
+  domains: []
+
+capabilities:
+  presets: [docker]   # installs docker.io so dockerd is present at boot
+
+prompt:
+  role: |
+    This VM runs the real NousResearch/hermes-agent (v2026.6.19) container, which serves its own OpenAI-compatible API. This system prompt file is unused by the container.

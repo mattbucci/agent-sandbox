@@ -29,6 +29,34 @@ remove_tap() {
     ip tuntap del dev "${tap_name}" mode tap 2>/dev/null || true
 }
 
+# Resolve a hostname to a single IPv4 address.
+# Prints the IPv4 on stdout; prints nothing (and returns 1) on failure.
+# A value that is already a dotted-quad IPv4 is returned unchanged.
+# Usage: resolve_ipv4 <host-or-ip>
+resolve_ipv4() {
+    local host="$1"
+    local ip=""
+
+    # Already a dotted-quad IPv4? Pass it through untouched.
+    if [[ "${host}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "${host}"
+        return 0
+    fi
+
+    # Prefer getent (honours nsswitch: hosts file, DNS, etc.)
+    ip=$(getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')
+
+    # Fall back to dig if getent yields nothing
+    if [[ -z "${ip}" ]]; then
+        ip=$(dig +short A "${host}" 2>/dev/null | head -1)
+    fi
+
+    if [[ -z "${ip}" ]]; then
+        return 1
+    fi
+    echo "${ip}"
+}
+
 # Add nftables rules for a VM
 # Usage: add_vm_nftables <slot> <tap-name> <gateway-ip>
 add_vm_nftables() {
@@ -44,7 +72,10 @@ add_vm_nftables() {
     local llm_port=""
     if [[ -n "${LLM_API_BASE:-}" ]]; then
         llm_host=$(echo "${LLM_API_BASE}" | sed -E 's|https?://||; s|:[0-9]+.*||; s|/.*||')
-        llm_port=$(echo "${LLM_API_BASE}" | grep -oP ':\K[0-9]+' | head -1)
+        # `grep` exits non-zero when the URL has no explicit port; under the
+        # caller's `set -o pipefail` that would abort launch, so tolerate it and
+        # fall back to 443 below.
+        llm_port=$(echo "${LLM_API_BASE}" | grep -oP ':\K[0-9]+' | head -1) || true
         llm_port="${llm_port:-443}"
     fi
 
@@ -79,12 +110,25 @@ add_vm_nftables() {
 
     # Allow VM → LiteLLM server (direct, bypasses Squid)
     if [[ -n "${llm_host}" ]]; then
-        nft add rule ip vm_filter prerouting \
-            iifname "${tap_name}" ip daddr "${llm_host}" tcp dport "${llm_port}" accept \
-            comment "\"vm${slot}-llm-passthrough\""
-        nft add rule ip vm_filter forward \
-            iifname "${tap_name}" ip daddr "${llm_host}" tcp dport "${llm_port}" accept \
-            comment "\"vm${slot}-llm\""
+        # nftables 'ip daddr' requires a literal IPv4 address. LLM_API_BASE may
+        # contain a hostname (e.g. simple-llm-router.ph.ca), so resolve it to a single IPv4 at
+        # rule-add time. If resolution fails, warn and skip the passthrough rule
+        # rather than adding a broken/ambiguous rule.
+        local llm_ip
+        # resolve_ipv4 exits non-zero on failure; under the caller's `set -e`
+        # that would abort launch before the warn-and-skip branch below, so
+        # tolerate it and let the empty-check handle failure.
+        llm_ip=$(resolve_ipv4 "${llm_host}") || true
+        if [[ -z "${llm_ip}" ]]; then
+            echo "network.sh: WARNING: could not resolve LLM host '${llm_host}' to an IPv4 address; skipping LLM passthrough rule for vm${slot}" >&2
+        else
+            nft add rule ip vm_filter prerouting \
+                iifname "${tap_name}" ip daddr "${llm_ip}" tcp dport "${llm_port}" accept \
+                comment "\"vm${slot}-llm-passthrough\""
+            nft add rule ip vm_filter forward \
+                iifname "${tap_name}" ip daddr "${llm_ip}" tcp dport "${llm_port}" accept \
+                comment "\"vm${slot}-llm\""
+        fi
     fi
 
     # NOTE: Squid runs on the HOST, so its outbound traffic goes through the
@@ -107,6 +151,38 @@ remove_vm_nftables() {
                 nft delete rule ip vm_filter "${chain}" handle "${handle}" 2>/dev/null || true
             done
     done
+}
+
+# Ensure the host accepts inbound TCP to the gateway router port from the LAN.
+#
+# The hermes-gateway router binds the host LAN IP directly (no DNAT), and
+# vm_filter's input chain only drops tap-vm* traffic, so plain LAN->host:<port>
+# is already accepted by the kernel. The only thing that can block it is a
+# separate host firewall such as firewalld. This helper is therefore a no-op
+# unless firewalld is installed AND active, in which case it opens the port.
+#
+# NOTE: this opens the port at runtime only. Add '--permanent' below (and re-run
+# with the runtime form too) if the rule should survive a firewalld reload.
+#
+# Usage: allow_gateway_ingress [port]   (default port 8642)
+allow_gateway_ingress() {
+    local port="${1:-8642}"
+
+    # No-op when firewalld is not present.
+    if ! command -v firewall-cmd >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # No-op when firewalld is present but not running.
+    if ! firewall-cmd --state >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Idempotent: firewalld treats adding an already-open port as success.
+    if ! firewall-cmd --add-port="${port}/tcp" >/dev/null 2>&1; then
+        echo "network.sh: WARNING: failed to open gateway port ${port}/tcp in firewalld" >&2
+        return 1
+    fi
 }
 
 # Full cleanup for a VM's network

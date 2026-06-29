@@ -47,6 +47,9 @@ NO_AGENT="${NO_AGENT:-0}"
 hostname "${VM_HOSTNAME}"
 echo "${VM_HOSTNAME}" > /etc/hostname
 echo "127.0.0.1 localhost ${VM_HOSTNAME}" > /etc/hosts
+# Append extra host entries staged by prepare-rootfs (e.g. the internal LLM
+# endpoint, which the VM's public-upstream dnsmasq cannot resolve by name).
+[ -f /etc/agent-hosts ] && cat /etc/agent-hosts >> /etc/hosts
 
 log "Hostname: ${VM_HOSTNAME}"
 

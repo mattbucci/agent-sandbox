@@ -8,7 +8,8 @@ files that the bash scripts consume:
   agentconf.py compile <type>      → build/<type>/{agent.conf, allowlist.txt,
                                       system-prompt.md, customize.sh, tools.json}
   agentconf.py compile-global      → build/sandbox.conf
-  agentconf.py compile-all         → compile global + all agents
+  agentconf.py compile-gateway     → state/gateway/gateway.json
+  agentconf.py compile-all         → compile global + gateway + all agents
   agentconf.py validate <type>     → validate agent YAML + preset references
   agentconf.py list                → list agent types
   agentconf.py list-presets [cat]  → list presets (egress|capabilities|prompts)
@@ -244,6 +245,19 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
     defaults = global_config.get("vm_defaults", {})
     github = agent.get("github", {})
 
+    # Gateway (in-VM OpenAI server) config
+    gateway = global_config.get("gateway", {}) or {}
+    gw_agents = gateway.get("agents", {}) or {}
+    agent_gw = gw_agents.get(agent_info.get("type", "generic"), {}) or {}
+    gateway_enabled = 1 if gateway.get("enabled", True) else 0
+    gateway_port = gateway.get("vm_gateway_port", 8642)
+    api_server_key = agent_gw.get("api_server_key", "") or ""
+
+    # Harness selects the in-VM backend runner (see start.sh):
+    #   "deepagents" (default) -> gateway_server.py / agent.py
+    #   "hermes"               -> run-hermes.sh (pre-baked hermes container)
+    harness = agent_info.get("harness", "deepagents")
+
     lines = [
         f"# Auto-generated agent.conf for {agent_info.get('type', 'unknown')}",
         f'AGENT_TYPE="{agent_info.get("type", "generic")}"',
@@ -251,6 +265,10 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
         f'LLM_MODEL="{vm.get("model", llm.get("model", "default-model"))}"',
         f'VCPUS="{vm.get("vcpus", defaults.get("vcpus", 4))}"',
         f'MEM_MB="{vm.get("mem_mb", defaults.get("mem_mb", 8192))}"',
+        f'GATEWAY_ENABLED="{gateway_enabled}"',
+        f'GATEWAY_PORT="{gateway_port}"',
+        f'API_SERVER_KEY="{api_server_key}"',
+        f'HARNESS="{harness}"',
     ]
 
     # GitHub token injection — read from secrets file if it exists
@@ -342,9 +360,70 @@ def cmd_compile_global():
         f'SQUID_HTTPS_PORT={squid.get("https_port", 3129)}',
     ]
 
+    # Per-agent rootfs size overrides -> ROOTFS_SIZE_MB_<type> (hyphens -> _).
+    # cmd_build_agent reads these to grow a cloned rootfs (e.g. hermes, which
+    # needs headroom to bake + docker-load the pre-baked image on one fs).
+    rootfs_per_agent = rootfs.get("per_agent", {}) or {}
+    if rootfs_per_agent:
+        lines.append("")
+        for atype, size in rootfs_per_agent.items():
+            var = "ROOTFS_SIZE_MB_" + str(atype).replace("-", "_")
+            lines.append(f"{var}={size}")
+
     out_path = BUILD_DIR / "sandbox.conf"
     out_path.write_text("\n".join(lines) + "\n")
     print(f"Compiled global config → {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Compile: Gateway Router Config
+# ---------------------------------------------------------------------------
+
+def cmd_compile_gateway():
+    """Compile the gateway: block from sandbox.yaml into state/gateway/gateway.json."""
+    config = load_global_config()
+    gateway = config.get("gateway", {}) or {}
+
+    out_dir = SANDBOX_ROOT / "state" / "gateway"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Normalize tokens -> [{name, token, agents}]
+    tokens = []
+    for t in (gateway.get("tokens", []) or []):
+        t = t or {}
+        tokens.append({
+            "name": t.get("name", ""),
+            "token": t.get("token", ""),
+            "agents": t.get("agents", []),
+        })
+
+    # Normalize agents -> {"<type>": {"api_server_key": "<key>"[, "model": "<m>"]}}
+    agents = {}
+    for name, spec in (gateway.get("agents", {}) or {}).items():
+        spec = spec or {}
+        entry = {"api_server_key": spec.get("api_server_key", "") or ""}
+        # Optional per-agent model rewrite: the router rewrites the outgoing
+        # OpenAI `model` (== agent id) to this value before forwarding downstream.
+        model = spec.get("model")
+        if model:
+            entry["model"] = model
+        agents[name] = entry
+
+    gateway_json = {
+        "bind": gateway.get("bind", "0.0.0.0"),
+        "port": gateway.get("port", 8642),
+        "default_agent": gateway.get("default_agent", "feature-dev"),
+        "state_dir": str(SANDBOX_ROOT / "state"),
+        "vm_gateway_port": gateway.get("vm_gateway_port", 8642),
+        "tokens": tokens,
+        "agents": agents,
+    }
+
+    out_path = out_dir / "gateway.json"
+    with open(out_path, "w") as f:
+        json.dump(gateway_json, f, indent=2)
+        f.write("\n")
+    print(f"Compiled gateway config → {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -529,8 +608,11 @@ def main():
         cmd_compile(sys.argv[2])
     elif cmd == "compile-global":
         cmd_compile_global()
+    elif cmd == "compile-gateway":
+        cmd_compile_gateway()
     elif cmd == "compile-all":
         cmd_compile_global()
+        cmd_compile_gateway()
         for path in sorted(AGENTS_DIR.glob("*.yaml")):
             cmd_compile(path.stem)
     elif cmd == "validate" and len(sys.argv) >= 3:
