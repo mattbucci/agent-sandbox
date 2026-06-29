@@ -7,12 +7,17 @@ kernel/vmlinux
 rootfs/base.ext4
 rootfs/staging/
 rootfs/agents/*/rootfs.ext4
+rootfs/agents/*/images/
 build/
 
 # Secrets
 config/sandbox.yaml
 config/sandbox.conf
 config/secrets/
+
+# Python
+__pycache__/
+*.pyc
 
 # OS
 .DS_Store

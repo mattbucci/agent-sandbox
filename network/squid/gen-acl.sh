@@ -69,8 +69,15 @@ fi
     echo "# Allowed domains for VM slot ${SLOT} (${AGENT_TYPE})"
     echo "# Generated: $(date -Iseconds)"
     {
-        [[ -f "${ALLOWLIST_FILE}" ]] && grep -v '^\s*#' "${ALLOWLIST_FILE}" | grep -v '^\s*$'
-        [[ -n "${LLM_HOST}" ]] && echo "${LLM_HOST}"
+        # `grep -v` exits non-zero when it filters out every line (e.g. an agent
+        # with an empty/comment-only allowlist whose egress is just the LLM
+        # passthrough). Under `set -euo pipefail` that would abort the pipe
+        # subshell BEFORE the LLM host below is emitted — and fail the launch —
+        # so tolerate "no matches" explicitly.
+        if [[ -f "${ALLOWLIST_FILE}" ]]; then
+            grep -v '^\s*#' "${ALLOWLIST_FILE}" | grep -v '^\s*$' || true
+        fi
+        [[ -n "${LLM_HOST}" ]] && echo "${LLM_HOST}" || true
     } | dedupe_domains
 } > "${DOMAINS_FILE}"
 
@@ -99,8 +106,10 @@ done
 {
     echo "# Combined allowed domains (all VMs)"
     echo "# Generated: $(date -Iseconds)"
-    cat "${ACL_DIR}"/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' \
-        | sort -u | dedupe_domains
+    # `|| true` so an all-empty union (every agent on LLM-passthrough only) does
+    # not abort under pipefail/set -e.
+    { cat "${ACL_DIR}"/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sort -u || true; } \
+        | dedupe_domains
 } > "${ACL_DIR}/all-allowed-domains.txt"
 
 echo "ACL generated for VM slot ${SLOT} (${AGENT_TYPE}): ${CONF_FILE}"

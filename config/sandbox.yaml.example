@@ -1,7 +1,9 @@
 llm:
-  api_base: "http://192.168.1.100:4000/v1"
-  api_key: "sk-your-litellm-key"
-  model: "default-model"
+  # LAN LLM router (OpenAI-compatible). No auth required; placeholder key.
+  # Aliases: gemma (default, multimodal), north (reasoning/code), smart, council.
+  api_base: "http://simple-llm-router.ph.ca:8080/v1"
+  api_key: "sk-lan"
+  model: "gemma"
 
 vm_defaults:
   vcpus: 4
@@ -23,3 +25,28 @@ rootfs:
 squid:
   http_port: 3128
   https_port: 3129
+
+# Hermes Gateway router — exposes sandboxed agents to hermes-webui over an
+# OpenAI-compatible API. Compiled to state/gateway/gateway.json by compile-gateway.
+gateway:
+  enabled: true
+  bind: "0.0.0.0"          # host LAN bind for the router
+  port: 8642
+  default_agent: "feature-dev"
+  vm_gateway_port: 8642    # in-VM OpenAI server port (inside each VM)
+  tokens:
+    # North-gate bearer the router requires from incoming webui requests.
+    - name: "hermes-webui"
+      token: "hgw_your-gateway-token-here"
+      agents: ["*"]
+  agents:                  # exposed agent types + downstream per-VM key (may be "")
+    feature-dev: { api_server_key: "" }
+    debugger:    { api_server_key: "" }
+    devops:      { api_server_key: "" }
+    researcher:  { api_server_key: "" }
+    security:    { api_server_key: "" }
+    # Real NousResearch/hermes-agent v2026.6.19 (Docker, pre-baked into the VM).
+    # Its in-VM API server requires this bearer; the router presents it downstream.
+    # `model` rewrites the outgoing OpenAI model field (the agent id "hermes") to a
+    # real LLM alias before forwarding, so the container's API server accepts it.
+    hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma" }

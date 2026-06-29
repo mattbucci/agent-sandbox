@@ -101,6 +101,21 @@ bin/sandbox-ctl config validate X    # check an agent YAML
 bin/sandbox-ctl config compile       # YAML → flat build files
 ```
 
+## Hermes Gateway
+
+A Go router on the bare-metal host (`hermes-gateway.ph.ca` / `192.168.2.179:8642`,
+binds `0.0.0.0`, no DNAT) presents the OpenAI-compatible `hermes-webui` gateway
+contract and routes each request to a sandboxed agent VM. It is the abstraction
+layer: the `model` field selects the agent, a per-token scope authorizes it, and
+the request is stream-proxied to that VM's in-VM server on `:8642`, which runs
+inference against the LAN LLM router (`simple-llm-router.ph.ca:8080`, default model
+`gemma`). Configure it under the `gateway` block in `config/sandbox.yaml`, then
+`sandbox-ctl gateway compile|build|start`. See [Hermes Gateway](docs/hermes-gateway.md).
+
+A real pinned `NousResearch/hermes-agent:v2026.6.19` backend is also available — a
+pre-baked Docker image in its own VM, selected from the webui as model `hermes`. See
+[Real hermes-agent backend](docs/hermes-gateway.md#real-hermes-agent-backend-v2026619).
+
 ## Security
 
 Tested against real supply chain attacks (litellm .pth harvester, axios npm RAT) and 21 escape techniques across 7 categories. All exfiltration attempts blocked.
@@ -144,6 +159,7 @@ Testing:    integration-test.sh, security-test.sh, supply-chain-test.sh,
 | [Creating Agents](docs/creating-agents.md) | How to define custom agents with YAML + presets |
 | [Architecture](docs/architecture.md) | System design, config pipeline, network model |
 | [Operations](docs/operations.md) | Running, monitoring, troubleshooting, base tools |
+| [Hermes Gateway](docs/hermes-gateway.md) | OpenAI-compatible router fronting agent VMs for hermes-webui |
 | [Security](docs/security.md) | Threat model, defense layers, accepted risks |
 | [Presets Reference](docs/presets-reference.md) | All egress, capability, and prompt presets |
 

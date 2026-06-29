@@ -37,6 +37,18 @@ chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 # Back-compat: expose the classic `docker-compose` entrypoint too.
 ln -sf /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
+# 3. Let the unprivileged 'agent' user reach the Docker socket without sudo.
+# agent-init starts dockerd as root, which creates /var/run/docker.sock as
+# root:docker mode 0660. The agent harness is launched via `su - agent` (a login
+# shell that picks up supplementary groups), and the 'agent' user is created with
+# only sudo,video,audio groups — NOT docker. Add it to the 'docker' group here,
+# in the chroot where both the user and the group already exist (docker.io's apt
+# install created the group above), so `docker load`/`docker run` work at runtime
+# (e.g. the hermes harness in /opt/agent/run-hermes.sh) without per-command sudo.
+if getent group docker >/dev/null 2>&1 && id agent >/dev/null 2>&1; then
+    usermod -aG docker agent
+fi
+
 # Baseline dockerd config. userland-proxy=false avoids needing docker-proxy on
 # PATH (agent-init starts dockerd as PID-1 child with a minimal PATH, so the
 # proxy binary in /usr/bin would not be found otherwise).

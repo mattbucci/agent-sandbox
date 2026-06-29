@@ -20,6 +20,12 @@
 #   list-agents        Show available agent types
 #   network-status     Show network configuration
 #   cleanup            Remove stopped VM state and reclaim disk
+#   gateway build      Build the hermes-gateway router binary
+#   gateway compile    Regenerate state/gateway/gateway.json
+#   gateway start      Start the gateway router in the background
+#   gateway stop       Stop the gateway router
+#   gateway status     Show router status and exposed agents
+#   gateway prebake-hermes  Pull+save the real hermes-agent image for baking
 # =============================================================================
 set -euo pipefail
 
@@ -115,6 +121,26 @@ cmd_build_agent() {
     mkdir -p "${agent_dir}"
     cp --reflink=auto --sparse=always "${base_rootfs}" "${agent_rootfs}"
 
+    # Grow the cloned rootfs to the agent's configured size BEFORE mounting/baking.
+    # The base is fixed at ROOTFS_SIZE_MB (sandbox.yaml rootfs.size_mb); agents may
+    # request a larger sparse filesystem via rootfs.per_agent, emitted into
+    # sandbox.conf as ROOTFS_SIZE_MB_<type>. hermes needs the extra room to bake
+    # the multi-GB image tar AND docker-load it onto the same fs at boot.
+    local size_var="ROOTFS_SIZE_MB_${agent_type//-/_}"
+    local agent_size_mb="${ROOTFS_SIZE_MB:-8192}"
+    if [[ -n "${!size_var:-}" ]]; then
+        agent_size_mb="${!size_var}"
+    fi
+    local cur_bytes target_bytes
+    cur_bytes=$(stat -c%s "${agent_rootfs}")
+    target_bytes=$(( agent_size_mb * 1024 * 1024 ))
+    if (( target_bytes > cur_bytes )); then
+        log_info "Growing ${agent_type} rootfs to ${agent_size_mb}MB (sparse) for image headroom..."
+        truncate -s "${agent_size_mb}M" "${agent_rootfs}"
+        e2fsck -fy "${agent_rootfs}" >/dev/null 2>&1 || true
+        resize2fs "${agent_rootfs}"
+    fi
+
     # Mount and customize
     local mount_point
     mount_point=$(mktemp -d)
@@ -149,6 +175,21 @@ cmd_build_agent() {
     # Copy compiled system prompt
     mkdir -p "${mount_point}/etc/agent"
     cp "${build_dir}/system-prompt.md" "${mount_point}/etc/agent/system-prompt.md"
+
+    # Bake in any pre-staged Docker image tars (e.g. the real hermes-agent image
+    # staged by 'sandbox-ctl gateway prebake-hermes'). The customize.sh chroot has
+    # no dockerd, so images are loaded at VM boot from /opt/hermes/images instead.
+    # No-op for agent types without an images/ dir (all existing agents).
+    local images_dir="${agent_dir}/images"
+    if [[ -d "${images_dir}" ]] && compgen -G "${images_dir}/*.tar" >/dev/null; then
+        log_info "Baking pre-staged image tar(s) into ${agent_type} rootfs..."
+        mkdir -p "${mount_point}/opt/hermes/images"
+        local tar
+        for tar in "${images_dir}"/*.tar; do
+            cp "${tar}" "${mount_point}/opt/hermes/images/"
+            log_info "  Copied $(basename "${tar}") ($(du -h "${tar}" | cut -f1))"
+        done
+    fi
 
     # Clean up
     chroot "${mount_point}" bash -c '
@@ -459,6 +500,183 @@ cmd_cleanup() {
     log_ok "Cleaned up ${cleaned} stopped VM(s)."
 }
 
+cmd_gateway() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    local gw_dir="${STATE_DIR}/gateway"
+    local gw_config="${gw_dir}/gateway.json"
+    local gw_bin="${gw_dir}/hermes-gateway"
+    local gw_pidfile="${gw_dir}/gateway.pid"
+    local gw_log="${LOG_DIR}/gateway.log"
+
+    case "${subcmd}" in
+        build)
+            if ! command -v go &>/dev/null; then
+                log_error "'go' is not installed. Install Go to build the hermes-gateway router."
+                exit 1
+            fi
+            mkdir -p "${gw_dir}"
+            log_info "Building hermes-gateway router..."
+            ( cd "${SANDBOX_ROOT}/gateway" && go build -o "${gw_bin}" . )
+            log_ok "Router built: ${gw_bin}"
+            ;;
+
+        compile)
+            log_info "Compiling gateway router config..."
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile-gateway
+            log_ok "Gateway config written: ${gw_config}"
+            ;;
+
+        start)
+            require_root "gateway start"
+
+            # Ensure config compiled + binary built before launching.
+            [[ -f "${gw_config}" ]] || cmd_gateway compile
+            [[ -x "${gw_bin}"    ]] || cmd_gateway build
+
+            mkdir -p "${gw_dir}" "${LOG_DIR}"
+
+            if [[ -f "${gw_pidfile}" ]]; then
+                local existing_pid
+                existing_pid=$(cat "${gw_pidfile}" 2>/dev/null)
+                if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+                    log_warn "Gateway router already running (PID ${existing_pid})."
+                    return 0
+                fi
+            fi
+
+            log_info "Starting hermes-gateway router..."
+            nohup "${gw_bin}" -config "${gw_config}" >> "${gw_log}" 2>&1 &
+            local gw_pid=$!
+            echo "${gw_pid}" > "${gw_pidfile}"
+
+            local bind port
+            bind=$(jq -r '.bind' "${gw_config}")
+            port=$(jq -r '.port' "${gw_config}")
+
+            # Open host firewall ingress for the router port if network.sh provides it.
+            source "${SANDBOX_ROOT}/lib/network.sh"
+            if declare -F allow_gateway_ingress >/dev/null; then
+                allow_gateway_ingress "${port}"
+            fi
+
+            log_ok "Gateway router started (PID ${gw_pid}), listening on ${bind}:${port}"
+            log_info "Logs: ${gw_log}"
+            ;;
+
+        stop)
+            require_root "gateway stop"
+
+            if [[ ! -f "${gw_pidfile}" ]]; then
+                log_info "Gateway router not running (no pidfile)."
+                return 0
+            fi
+
+            local gw_pid
+            gw_pid=$(cat "${gw_pidfile}" 2>/dev/null)
+            if [[ -n "${gw_pid}" ]] && kill -0 "${gw_pid}" 2>/dev/null; then
+                kill "${gw_pid}" 2>/dev/null || true
+                log_ok "Stopped gateway router (PID ${gw_pid})."
+            else
+                log_info "Gateway router not running (stale pidfile)."
+            fi
+            rm -f "${gw_pidfile}"
+            ;;
+
+        prebake-hermes)
+            # Stage the real hermes-agent image on the HOST so cmd_build_agent can
+            # bake it into the hermes rootfs (the chroot has no dockerd to pull it).
+            local force=0
+            [[ "${1:-}" == "--force" ]] && force=1
+
+            if ! command -v docker &>/dev/null; then
+                log_error "'docker' is not installed. Install Docker on the host to pre-bake the hermes-agent image."
+                exit 1
+            fi
+
+            local hermes_image="nousresearch/hermes-agent:v2026.6.19"
+            local image_dir="${SANDBOX_ROOT}/rootfs/agents/hermes/images"
+            local image_tar="${image_dir}/hermes-agent-v2026.6.19.tar"
+
+            if [[ -f "${image_tar}" && ${force} -eq 0 ]]; then
+                log_info "Image tar already staged: ${image_tar}"
+                log_info "  Size: $(du -h "${image_tar}" | cut -f1)"
+                log_info "Use 'sandbox-ctl gateway prebake-hermes --force' to re-pull and overwrite."
+                return 0
+            fi
+
+            log_info "Pulling ${hermes_image} (host has registry egress)..."
+            docker pull "${hermes_image}"
+
+            mkdir -p "${image_dir}"
+            log_info "Saving image to ${image_tar}..."
+            docker save "${hermes_image}" -o "${image_tar}"
+
+            log_ok "Pre-baked hermes-agent image staged: ${image_tar}"
+            echo "  Size: $(du -h "${image_tar}" | cut -f1)"
+            ;;
+
+        status)
+            if [[ ! -f "${gw_config}" ]]; then
+                log_warn "Gateway not configured. Run 'sandbox-ctl gateway compile' first."
+                return 0
+            fi
+
+            local bind port
+            bind=$(jq -r '.bind' "${gw_config}")
+            port=$(jq -r '.port' "${gw_config}")
+
+            local router_status="STOPPED"
+            if [[ -f "${gw_pidfile}" ]]; then
+                local gw_pid
+                gw_pid=$(cat "${gw_pidfile}" 2>/dev/null)
+                if [[ -n "${gw_pid}" ]] && kill -0 "${gw_pid}" 2>/dev/null; then
+                    router_status="RUNNING (PID ${gw_pid})"
+                fi
+            fi
+
+            echo "=== Hermes Gateway Status ==="
+            echo ""
+            echo "  Router:  ${router_status}"
+            echo "  Listen:  ${bind}:${port}"
+            echo ""
+            echo "  Exposed agents:"
+
+            # Collect agent types of currently-running VMs.
+            local running_agents=()
+            local info
+            while IFS= read -r info; do
+                [[ -n "${info}" ]] || continue
+                running_agents+=("$(jq -r '.agent_type' "${info}" 2>/dev/null)")
+            done < <(list_running_vms)
+
+            local agent a vm_state
+            for agent in $(jq -r '.agents | keys[]' "${gw_config}"); do
+                vm_state="no VM"
+                for a in "${running_agents[@]+"${running_agents[@]}"}"; do
+                    if [[ "${a}" == "${agent}" ]]; then
+                        vm_state="VM running"
+                        break
+                    fi
+                done
+                printf "    %-14s %s\n" "${agent}" "${vm_state}"
+            done
+            ;;
+
+        *)
+            echo "Usage: sandbox-ctl gateway <subcommand>"
+            echo ""
+            echo "  build              Build the hermes-gateway router binary (needs 'go')"
+            echo "  compile            Regenerate state/gateway/gateway.json from sandbox.yaml"
+            echo "  start              Compile + build if needed, then launch the router (background)"
+            echo "  stop               Stop the running router"
+            echo "  status             Show router status, listen addr, and exposed agents"
+            echo "  prebake-hermes     Pull+save nousresearch/hermes-agent:v2026.6.19 for baking (--force to re-pull)"
+            ;;
+    esac
+}
+
 cmd_help() {
     cat <<'HELP'
 sandbox-ctl — Firecracker Agent Sandbox Manager
@@ -525,6 +743,7 @@ case "${COMMAND}" in
     ssh)            cmd_ssh "$@" ;;
     list-agents)    cmd_list_agents "$@" ;;
     config)         cmd_config "$@" ;;
+    gateway)        cmd_gateway "$@" ;;
     network-status) cmd_network_status "$@" ;;
     cleanup)        cmd_cleanup "$@" ;;
     help|--help|-h) cmd_help ;;
