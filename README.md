@@ -116,6 +116,12 @@ A real pinned `NousResearch/hermes-agent:v2026.6.19` backend is also available â
 pre-baked Docker image in its own VM, selected from the webui as model `hermes`. See
 [Real hermes-agent backend](docs/hermes-gateway.md#real-hermes-agent-backend-v2026619).
 
+Durable agent memory is part of the hosted agent surface: a shared
+[mnemosyne](https://pypi.org/project/mnemosyne-memory/) MCP service (`:8077`,
+`sandbox-ctl mnemosyne start`) backs every agent â€” see
+[Agent memory (mnemosyne)](docs/hermes-gateway.md#agent-memory-mnemosyne) and
+[ADR 0002](docs/adr/0002-agent-memory-hosted-surface.md).
+
 ## Security
 
 Tested against real supply chain attacks (litellm .pth harvester, axios npm RAT) and 21 escape techniques across 7 categories. All exfiltration attempts blocked.

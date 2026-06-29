@@ -26,6 +26,10 @@
 #   gateway stop       Stop the gateway router
 #   gateway status     Show router status and exposed agents
 #   gateway prebake-hermes  Pull+save the real hermes-agent image for baking
+#   mnemosyne install  Install the shared agent-memory MCP service (venv)
+#   mnemosyne start    Start the memory MCP server + open VM firewall
+#   mnemosyne stop     Stop the memory MCP server + close VM firewall
+#   mnemosyne status   Show memory service status
 # =============================================================================
 set -euo pipefail
 
@@ -680,6 +684,249 @@ cmd_gateway() {
     esac
 }
 
+# --- Mnemosyne nftables helpers (shared memory service ingress) ---
+# VMs reach this HOST service on their per-VM gateway IP, so the traffic lands in
+# vm_filter's INPUT chain — which drops tap-vm* by default. These mirror the OTel
+# input allow in network/setup-host-network.sh, tagged with comment "mnemosyne".
+
+mnemosyne_nft_present() {
+    nft -a list chain ip vm_filter input 2>/dev/null | grep -q 'comment "mnemosyne"'
+}
+
+mnemosyne_nft_allow() {
+    local port="$1"
+    # The vm_filter table is created by setup-host-network.sh. If it's absent the
+    # host network isn't configured yet — warn and skip rather than hard-fail.
+    if ! nft list table ip vm_filter >/dev/null 2>&1; then
+        log_warn "nftables table 'ip vm_filter' not found; run 'sandbox-ctl setup' first."
+        log_warn "VMs cannot reach mnemosyne until the input allow is present."
+        return 0
+    fi
+    if mnemosyne_nft_present; then
+        return 0
+    fi
+    # MUST be 'insert' (prepend to chain head), not 'add' (append): the input chain
+    # ends with an explicit `iifname "tap-vm*" drop comment "vm-drop-host"` and
+    # nftables evaluates in order, so an appended accept would sit AFTER the drop
+    # and never match. 'insert' places it ahead of the drop (like vm-otel).
+    nft insert rule ip vm_filter input \
+        iifname "tap-vm*" tcp dport "${port}" accept \
+        comment "\"mnemosyne\""
+}
+
+mnemosyne_nft_remove() {
+    # Tolerant of "nothing to remove": under `set -euo pipefail` a non-matching
+    # grep would make the pipeline exit 1 and abort sandbox-ctl. Bail early when
+    # the rule (or the whole chain) is absent — common on stop-when-stopped, a
+    # second stop, or when the table was never created.
+    mnemosyne_nft_present || return 0
+    nft -a list chain ip vm_filter input 2>/dev/null | \
+        grep 'comment "mnemosyne"' | \
+        grep -oP 'handle \K[0-9]+' | \
+        while read -r handle; do
+            nft delete rule ip vm_filter input handle "${handle}" 2>/dev/null || true
+        done
+    return 0
+}
+
+cmd_mnemosyne() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    local mnem_dir="${STATE_DIR}/mnemosyne"
+    local venv_dir="${mnem_dir}/venv"
+    local data_dir="${mnem_dir}/data"
+    local pidfile="${mnem_dir}/mnemosyne.pid"
+    local mnem_bin="${venv_dir}/bin/mnemosyne"
+    local mnem_log="${LOG_DIR}/mnemosyne.log"
+
+    # Sourced from build/sandbox.conf (ensure_global_compiled), compiled from the
+    # config memory: block. Defaults match the contract (port 8077, fastembed).
+    local port="${MNEMOSYNE_PORT:-8077}"
+    local token="${MNEMOSYNE_TOKEN:-}"
+    local embeddings="${MNEMOSYNE_EMBEDDINGS:-fastembed}"
+
+    case "${subcmd}" in
+        install)
+            mkdir -p "${mnem_dir}"
+
+            # Embeddings extra: [embeddings] (fastembed + sqlite-vec) for semantic
+            # search; memory.embeddings="none" => FTS5 keyword-only. A remote /v1
+            # URL still needs sqlite-vec to store vectors, so it keeps [embeddings].
+            local extras="[embeddings,mcp]"
+            if [[ "${embeddings}" == "none" ]]; then
+                extras="[mcp]"
+                log_info "memory.embeddings=none: installing FTS5 keyword-only by request."
+            fi
+
+            if command -v uv &>/dev/null; then
+                # Preferred: uv supplies a managed python 3.12 (the host default
+                # may be too new — e.g. 3.14 — for fastembed/sqlite-vec wheels).
+                # uv downloads 3.12 on demand, so embeddings work on any host.
+                if [[ ! -x "${venv_dir}/bin/python" ]]; then
+                    log_info "Creating mnemosyne venv (uv, python 3.12) at ${venv_dir}..."
+                    uv venv --python 3.12 "${venv_dir}"
+                fi
+                log_info "Installing mnemosyne-memory${extras} into venv (uv)..."
+                if ! uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory${extras}"; then
+                    if [[ "${extras}" != "[mcp]" ]]; then
+                        log_warn "Install with ${extras} failed; retrying FTS5 keyword-only..."
+                        uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory[mcp]"
+                    else
+                        log_error "Failed to install mnemosyne-memory[mcp]."; exit 1
+                    fi
+                fi
+            else
+                # Fallback (no uv): stdlib venv. Prefer python3.12 on PATH; else the
+                # host python3 WITHOUT [embeddings] (wheels may be missing on newer Pythons).
+                local py="python3"
+                if command -v python3.12 &>/dev/null; then
+                    py="python3.12"
+                elif [[ "${extras}" == "[embeddings,mcp]" ]]; then
+                    extras="[mcp]"
+                    log_warn "No uv and no python3.12; using $(python3 -V 2>&1) WITHOUT [embeddings] (FTS5 keyword-only)."
+                    log_warn "Install uv (or python3.12) and re-run for semantic embeddings."
+                fi
+                if [[ ! -x "${venv_dir}/bin/python" ]]; then
+                    log_info "Creating mnemosyne venv (${py}) at ${venv_dir}..."
+                    "${py}" -m venv "${venv_dir}"
+                fi
+                "${venv_dir}/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
+                log_info "Installing mnemosyne-memory${extras} into venv..."
+                if ! "${venv_dir}/bin/python" -m pip install "mnemosyne-memory${extras}"; then
+                    if [[ "${extras}" != "[mcp]" ]]; then
+                        log_warn "Install with ${extras} failed; retrying FTS5 keyword-only..."
+                        "${venv_dir}/bin/python" -m pip install "mnemosyne-memory[mcp]"
+                    else
+                        log_error "Failed to install mnemosyne-memory[mcp]."; exit 1
+                    fi
+                fi
+            fi
+
+            log_ok "mnemosyne installed: ${mnem_bin}"
+            ;;
+
+        start)
+            require_root "mnemosyne start"
+
+            # Ensure installed before launching (idempotent).
+            [[ -x "${mnem_bin}" ]] || cmd_mnemosyne install
+
+            if [[ -z "${token}" ]]; then
+                log_error "No memory token configured. Set memory.token in config/sandbox.yaml,"
+                log_error "then run 'sandbox-ctl config compile' before starting mnemosyne."
+                exit 1
+            fi
+
+            mkdir -p "${data_dir}" "${LOG_DIR}"
+
+            if [[ -f "${pidfile}" ]]; then
+                local existing_pid
+                existing_pid=$(cat "${pidfile}" 2>/dev/null)
+                if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+                    log_warn "mnemosyne already running (PID ${existing_pid})."
+                    return 0
+                fi
+            fi
+
+            # Environment for the MCP server. A remote OpenAI-compatible embedding
+            # endpoint is configured only when embeddings is set to a URL.
+            local run_env=(
+                "MNEMOSYNE_DATA_DIR=${data_dir}"
+                "MNEMOSYNE_MCP_TOKEN=${token}"
+            )
+            if [[ "${embeddings}" == http://* || "${embeddings}" == https://* ]]; then
+                run_env+=("MNEMOSYNE_EMBEDDING_API_URL=${embeddings}")
+            fi
+
+            log_info "Starting mnemosyne MCP (SSE) on 0.0.0.0:${port}..."
+            nohup env "${run_env[@]}" \
+                "${mnem_bin}" mcp --transport sse --host 0.0.0.0 --port "${port}" \
+                >> "${mnem_log}" 2>&1 &
+            local mnem_pid=$!
+            echo "${mnem_pid}" > "${pidfile}"
+
+            # Open the host firewall so agent VMs can reach the service.
+            mnemosyne_nft_allow "${port}"
+
+            log_ok "mnemosyne started (PID ${mnem_pid}), MCP SSE on http://0.0.0.0:${port}/sse"
+            log_info "VMs reach it at http://mnemosyne.host:${port}/sse"
+            log_info "Logs: ${mnem_log}"
+            ;;
+
+        stop)
+            require_root "mnemosyne stop"
+
+            if [[ ! -f "${pidfile}" ]]; then
+                log_info "mnemosyne not running (no pidfile)."
+            else
+                local mnem_pid
+                mnem_pid=$(cat "${pidfile}" 2>/dev/null)
+                if [[ -n "${mnem_pid}" ]] && kill -0 "${mnem_pid}" 2>/dev/null; then
+                    kill "${mnem_pid}" 2>/dev/null || true
+                    log_ok "Stopped mnemosyne (PID ${mnem_pid})."
+                else
+                    log_info "mnemosyne not running (stale pidfile)."
+                fi
+                rm -f "${pidfile}"
+            fi
+
+            # Remove the VM input allow regardless of pidfile state.
+            mnemosyne_nft_remove
+            log_info "Removed mnemosyne nftables input allow (if present)."
+            ;;
+
+        status)
+            local mnem_status="STOPPED" mnem_pid=""
+            if [[ -f "${pidfile}" ]]; then
+                mnem_pid=$(cat "${pidfile}" 2>/dev/null)
+                if [[ -n "${mnem_pid}" ]] && kill -0 "${mnem_pid}" 2>/dev/null; then
+                    mnem_status="RUNNING (PID ${mnem_pid})"
+                fi
+            fi
+
+            local installed="no"
+            [[ -x "${mnem_bin}" ]] && installed="yes (${venv_dir})"
+
+            local token_state="not configured"
+            [[ -n "${token}" ]] && token_state="configured (${token:0:9}...)"
+
+            local nft_state="absent"
+            mnemosyne_nft_present && nft_state="present"
+
+            local data_size="-"
+            [[ -d "${data_dir}" ]] && data_size=$(du -sh "${data_dir}" 2>/dev/null | cut -f1)
+
+            # Resolved retrieval mode implied by the configured embeddings value.
+            local embed_mode="${embeddings}"
+            case "${embeddings}" in
+                none)               embed_mode="none (keyword-only FTS5)" ;;
+                http://*|https://*) embed_mode="${embeddings} (remote semantic)" ;;
+                *)                  embed_mode="${embeddings} (local semantic)" ;;
+            esac
+
+            echo "=== Mnemosyne Memory Status ==="
+            echo ""
+            echo "  Service:    ${mnem_status}"
+            echo "  Installed:  ${installed}"
+            echo "  Listen:     0.0.0.0:${port}/sse"
+            echo "  Embeddings: ${embed_mode}"
+            echo "  Token:      ${token_state}"
+            echo "  Data dir:   ${data_dir} (${data_size})"
+            echo "  VM allow:   nft input ${nft_state} (tap-vm* -> tcp dport ${port})"
+            ;;
+
+        *)
+            echo "Usage: sandbox-ctl mnemosyne <subcommand>"
+            echo ""
+            echo "  install            Create state/mnemosyne/venv + install mnemosyne-memory (prefers python3.12)"
+            echo "  start              Install if needed, launch the MCP SSE server + open the VM firewall"
+            echo "  stop               Stop the server and remove the VM firewall allow"
+            echo "  status             Show service status, listen addr, token (redacted), data size, VM allow"
+            ;;
+    esac
+}
+
 cmd_help() {
     cat <<'HELP'
 sandbox-ctl — Firecracker Agent Sandbox Manager
@@ -709,6 +956,12 @@ Config:
   config validate <type>   Validate an agent YAML definition
   config list-presets      List available presets by category
   config docs              Generate docs/presets-reference.md
+
+Memory (shared mnemosyne MCP service):
+  mnemosyne install        Create venv + install mnemosyne-memory (prefers python3.12)
+  mnemosyne start          Launch the MCP SSE server + open the VM firewall
+  mnemosyne stop           Stop the server + close the VM firewall
+  mnemosyne status         Show service status, listen addr, token, data size
 
 Info:
   list-agents              Show available agent types
@@ -747,6 +1000,7 @@ case "${COMMAND}" in
     list-agents)    cmd_list_agents "$@" ;;
     config)         cmd_config "$@" ;;
     gateway)        cmd_gateway "$@" ;;
+    mnemosyne)      cmd_mnemosyne "$@" ;;
     network-status) cmd_network_status "$@" ;;
     cleanup)        cmd_cleanup "$@" ;;
     help|--help|-h) cmd_help ;;

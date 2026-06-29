@@ -50,6 +50,10 @@ echo "127.0.0.1 localhost ${VM_HOSTNAME}" > /etc/hosts
 # Append extra host entries staged by prepare-rootfs (e.g. the internal LLM
 # endpoint, which the VM's public-upstream dnsmasq cannot resolve by name).
 [ -f /etc/agent-hosts ] && cat /etc/agent-hosts >> /etc/hosts
+# Publish the shared mnemosyne agent-memory service at a stable name. It runs on
+# the sandbox HOST, reachable from the VM at its gateway IP, so map mnemosyne.host
+# -> GATEWAY_IP (parsed from /proc/cmdline above). Guard on GATEWAY_IP being set.
+[ -n "${GATEWAY_IP}" ] && echo "${GATEWAY_IP} mnemosyne.host" >> /etc/hosts
 
 log "Hostname: ${VM_HOSTNAME}"
 

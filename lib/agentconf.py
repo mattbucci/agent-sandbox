@@ -262,6 +262,15 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
     #   "hermes"               -> run-hermes.sh (pre-baked hermes container)
     harness = agent_info.get("harness", "deepagents")
 
+    # Mnemosyne shared agent-memory (MCP over SSE). Inside every VM the host is
+    # reachable as mnemosyne.host (published by agent-init -> the VM gateway IP),
+    # so the URL is stable regardless of the per-VM gateway address.
+    memory = global_config.get("memory", {}) or {}
+    mnemosyne_enabled = 1 if memory.get("enabled", False) else 0
+    mnemosyne_port = memory.get("port", 8077)
+    mnemosyne_token = memory.get("token", "") or ""
+    mnemosyne_url = f"http://mnemosyne.host:{mnemosyne_port}/sse"
+
     lines = [
         f"# Auto-generated agent.conf for {agent_info.get('type', 'unknown')}",
         f'AGENT_TYPE="{agent_info.get("type", "generic")}"',
@@ -273,6 +282,10 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
         f'GATEWAY_PORT="{gateway_port}"',
         f'API_SERVER_KEY="{api_server_key}"',
         f'HARNESS="{harness}"',
+        f'MNEMOSYNE_ENABLED="{mnemosyne_enabled}"',
+        f'MNEMOSYNE_PORT="{mnemosyne_port}"',
+        f'MNEMOSYNE_TOKEN="{mnemosyne_token}"',
+        f'MNEMOSYNE_URL="{mnemosyne_url}"',
     ]
 
     # GitHub token injection — read from secrets file if it exists
@@ -333,6 +346,7 @@ def cmd_compile_global():
     fc = config.get("firecracker", {})
     rootfs = config.get("rootfs", {})
     squid = config.get("squid", {})
+    memory = config.get("memory", {}) or {}
 
     lines = [
         "# Auto-generated from config/sandbox.yaml",
@@ -362,6 +376,11 @@ def cmd_compile_global():
         "",
         f'SQUID_HTTP_PORT={squid.get("http_port", 3128)}',
         f'SQUID_HTTPS_PORT={squid.get("https_port", 3129)}',
+        "",
+        f'MEMORY_ENABLED={1 if memory.get("enabled", False) else 0}',
+        f'MNEMOSYNE_PORT={memory.get("port", 8077)}',
+        f'MNEMOSYNE_TOKEN="{memory.get("token", "") or ""}"',
+        f'MNEMOSYNE_EMBEDDINGS="{memory.get("embeddings", "fastembed") or "fastembed"}"',
     ]
 
     # Per-agent rootfs size overrides -> ROOTFS_SIZE_MB_<type> (hyphens -> _).

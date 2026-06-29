@@ -416,6 +416,122 @@ A missing or unknown bearer returns `401
 not scoped for the agent returns `403`; and a request for an agent with no running
 VM returns `502`.
 
+## Agent memory (mnemosyne)
+
+Durable agent memory is part of the hosted agent surface (see
+[ADR 0002](adr/0002-agent-memory-hosted-surface.md)). We host
+[mnemosyne](https://pypi.org/project/mnemosyne-memory/) as **one shared LAN MCP
+service** on the sandbox host and wire every agent VM to it. mnemosyne is
+MCP-only (no REST API): agents consume it over MCP-over-SSE. The store is a single
+shared SQLite tree partitioned per agent (`author_id` / `bank`).
+
+### Contract
+
+| Thing | Value |
+|-------|-------|
+| Host bind | `0.0.0.0:8077` |
+| Hostname inside VMs | `mnemosyne.host` (→ the VM's gateway IP `10.0.<slot>.1`) |
+| MCP SSE URL | `http://mnemosyne.host:8077/sse` |
+| Auth | bearer token — `Authorization: Bearer <token>` (`memory.token`) |
+| Data | `state/mnemosyne/data` (persistent; `state/` is gitignored) |
+| Venv | `state/mnemosyne/venv` |
+
+### Configuring it
+
+Add a `memory` block to `config/sandbox.yaml`:
+
+```yaml
+memory:
+  enabled: true
+  port: 8077
+  token: "mnem_YOUR_LONG_RANDOM_TOKEN"   # gitignored real value
+  embeddings: "fastembed"                # fastembed | none | <remote /v1 url>
+```
+
+`sandbox-ctl config compile` threads this through the existing pipeline:
+`compile-global` writes `MEMORY_ENABLED`, `MNEMOSYNE_PORT`, `MNEMOSYNE_TOKEN`,
+`MNEMOSYNE_EMBEDDINGS` into `build/sandbox.conf`; the per-agent compile writes
+`MNEMOSYNE_ENABLED`, `MNEMOSYNE_PORT`, `MNEMOSYNE_TOKEN`, and
+`MNEMOSYNE_URL=http://mnemosyne.host:<port>/sse` into `build/<type>/agent.conf` and
+thence each VM's `/etc/agent.conf` (auto-exported by `start.sh`'s `set -a`).
+
+### CLI workflow
+
+```bash
+# 1. Install the service venv under state/mnemosyne/ (one-time; re-runnable).
+sudo bin/sandbox-ctl mnemosyne install
+
+# 2. Start it on the host LAN (binds 0.0.0.0:8077, opens the VM→host firewall).
+sudo bin/sandbox-ctl mnemosyne start
+
+# 3. Check it (process + port + data dir).
+bin/sandbox-ctl mnemosyne status
+
+# 4. Stop it (also removes the nftables input allow).
+sudo bin/sandbox-ctl mnemosyne stop
+```
+
+`mnemosyne start` runs `mnemosyne mcp --transport sse --host 0.0.0.0 --port 8077`
+with `MNEMOSYNE_DATA_DIR=state/mnemosyne/data` and `MNEMOSYNE_MCP_TOKEN` from the
+config. `start`/`stop` require root because they edit the firewall: like the OTel
+allow in `network/setup-host-network.sh`, they add (and on stop remove) an
+idempotent `vm_filter` **input** rule
+`iifname "tap-vm*" tcp dport 8077 accept`, so VMs can reach the service on their
+gateway IP while the rest of VM→host stays dropped.
+
+### How the agents consume it
+
+**Name resolution.** Agent VMs reach the host at their per-VM gateway IP, which is
+not fixed, so `agent-init` publishes `mnemosyne.host` → the gateway IP (parsed from
+`/proc/cmdline`) right after it writes `/etc/hosts` / appends `/etc/agent-hosts` —
+the same pattern used to pin the LLM router name.
+
+**hermes.** `vm/prepare-rootfs.sh` adds an `mcp` server block to the container's
+`/opt/hermes/data/config.yaml` (only when `MNEMOSYNE_ENABLED=1`):
+
+```yaml
+mcp:
+  servers:
+    mnemosyne:
+      url: http://mnemosyne.host:8077/sse
+      transport: sse
+      headers: { Authorization: "Bearer <token>" }
+```
+
+Because the container gets its own `/etc/hosts` even under `--network host`,
+`run-hermes.sh` passes `--add-host mnemosyne.host:<gw>` (with
+`gw=$(ip route | awk '/default/{print $3}')`).
+
+**deepagents.** `agent.py` connects with
+[`langchain-mcp-adapters`](https://pypi.org/project/langchain-mcp-adapters/) and
+adds the memory tools to the agent:
+
+```python
+client = MultiServerMCPClient({"mnemosyne": {
+    "url": MNEMOSYNE_URL, "transport": "sse",
+    "headers": {"Authorization": f"Bearer {MNEMOSYNE_TOKEN}"}}})
+tools = await client.get_tools()
+agent = create_deep_agent(model=..., backend=..., system_prompt=..., tools=tools)
+```
+
+Tool loading is async and runs on `gateway_server.py`'s persistent event loop. It
+**degrades gracefully**: if `MNEMOSYNE_ENABLED` is unset/empty or the MCP connect
+fails, the agent is built with no memory tools and a warning is logged — it never
+crashes.
+
+### Persistence & the host-Python caveat
+
+The store persists at `state/mnemosyne/data` (never baked into a rootfs), so memory
+survives VM restarts and image rebuilds and is shared across all agents.
+
+Embeddings are optional. The host Python is **3.14** (bleeding edge), where
+`fastembed` / `sqlite-vec` wheels may not yet exist. `mnemosyne install` therefore
+prefers a **`python3.12`** if one is on the host, and **degrades gracefully**: if
+the `[embeddings]` extra can't be installed it falls back to a keyword-only (FTS5)
+install and logs it clearly, rather than hard-failing. Set `embeddings: "none"` to
+force keyword-only, or point `embeddings` at a remote OpenAI-compatible `/v1` URL
+to use a remote embedder instead of local `fastembed`.
+
 ## See also
 
 - [`gateway/README.md`](../gateway/README.md) — the Go router internals (config

@@ -1,6 +1,7 @@
 # Runtime state
 state/vms/
 state/logs/
+state/mnemosyne/
 
 # Built artifacts
 kernel/vmlinux

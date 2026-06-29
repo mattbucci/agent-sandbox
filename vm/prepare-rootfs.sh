@@ -87,6 +87,10 @@ GATEWAY_ENABLED="${GATEWAY_ENABLED:-1}"
 GATEWAY_PORT="${GATEWAY_PORT:-8642}"
 API_SERVER_KEY="${API_SERVER_KEY:-}"
 HARNESS="${HARNESS:-deepagents}"
+MNEMOSYNE_ENABLED="${MNEMOSYNE_ENABLED:-0}"
+MNEMOSYNE_PORT="${MNEMOSYNE_PORT:-8077}"
+MNEMOSYNE_TOKEN="${MNEMOSYNE_TOKEN:-}"
+MNEMOSYNE_URL="${MNEMOSYNE_URL:-}"
 EOF
 
 # /etc/hosts entry for the internal LLM endpoint. agent-init rewrites /etc/hosts
@@ -115,6 +119,24 @@ model:
   api_key: ${LLM_API_KEY}
   context_length: ${HERMES_CONTEXT_LENGTH:-131072}
 EOF
+
+    # Wire the shared mnemosyne agent-memory MCP server into the hermes config.
+    # Even with --network host the container gets its own /etc/hosts, so the
+    # mnemosyne.host name is also pinned via --add-host in run-hermes.sh. Only
+    # emit the mcp block when memory is enabled for this agent type.
+    if [[ "${MNEMOSYNE_ENABLED:-0}" == "1" && -z "${MNEMOSYNE_TOKEN:-}" ]]; then
+        echo "WARNING: MNEMOSYNE_ENABLED=1 but MNEMOSYNE_TOKEN is empty; skipping mcp block (would 401)." >&2
+    elif [[ "${MNEMOSYNE_ENABLED:-0}" == "1" ]]; then
+        echo "Wiring mnemosyne MCP server into hermes config.yaml..."
+        cat >> "${MOUNT_POINT}/opt/hermes/data/config.yaml" <<EOF
+mcp:
+  servers:
+    mnemosyne:
+      url: http://mnemosyne.host:${MNEMOSYNE_PORT:-8077}/sse
+      transport: sse
+      headers: { Authorization: "Bearer ${MNEMOSYNE_TOKEN}" }
+EOF
+    fi
 
     # Disable docker's iptables management so dockerd comes up on the stock
     # guest kernel (no 'raw' table). Must exist before dockerd starts at boot.
