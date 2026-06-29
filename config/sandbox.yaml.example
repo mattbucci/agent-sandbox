@@ -50,3 +50,14 @@ gateway:
     # `model` rewrites the outgoing OpenAI model field (the agent id "hermes") to a
     # real LLM alias before forwarding, so the container's API server accepts it.
     hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma" }
+
+# Mnemosyne shared agent-memory service (MCP over SSE). Runs on the sandbox
+# HOST (bin/sandbox-ctl mnemosyne ...), bound 0.0.0.0:<port>; agent VMs reach it
+# at http://mnemosyne.host:<port>/sse (mnemosyne.host -> the VM's gateway IP).
+memory:
+  enabled: true
+  port: 8077
+  token: "mnem_your-token"
+  # Embedding backend: "fastembed" (local), "none" (FTS5 keyword-only),
+  # or a remote OpenAI-compatible /v1 URL.
+  embeddings: "fastembed"

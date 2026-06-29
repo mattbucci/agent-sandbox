@@ -84,6 +84,36 @@ def load_system_prompt() -> str:
     return f"You are an AI agent of type: {os.environ.get('AGENT_TYPE', 'generic')}."
 
 
+async def _load_mcp_tools():
+    """Fetch tools from the mnemosyne MCP server (shared agent-memory).
+
+    Returns a list of LangChain tools, or [] on any failure so the agent can
+    always be built — even when mnemosyne is disabled or unreachable.
+    """
+    url = os.environ.get("MNEMOSYNE_URL")
+    token = os.environ.get("MNEMOSYNE_TOKEN", "")
+    if not url:
+        logger.warning("MNEMOSYNE_ENABLED set but MNEMOSYNE_URL is empty; skipping MCP tools")
+        return []
+
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        client = MultiServerMCPClient({
+            "mnemosyne": {
+                "url": url,
+                "transport": "sse",
+                "headers": {"Authorization": f"Bearer {token}"},
+            }
+        })
+        tools = await client.get_tools()
+        logger.info(f"Loaded {len(tools)} mnemosyne MCP tool(s) from {url}")
+        return tools
+    except Exception as e:
+        logger.warning(f"Failed to load mnemosyne MCP tools from {url}: {e}")
+        return []
+
+
 def create_agent():
     """Create and configure the DeepAgents agent."""
     from deepagents import create_deep_agent
@@ -117,16 +147,34 @@ def create_agent():
         use_responses_api=False,
     )
 
+    # Optionally load mnemosyne shared agent-memory tools over MCP (SSE).
+    # create_agent() is always called OUTSIDE a running event loop (gateway_server
+    # calls it under a thread lock, not inside a coroutine; main() calls it before
+    # asyncio.run). So asyncio.run() here is safe and won't block a live loop.
+    mcp_tools = []
+    if os.environ.get("MNEMOSYNE_ENABLED", "").strip() not in ("", "0", "false", "False"):
+        try:
+            mcp_tools = asyncio.run(_load_mcp_tools())
+        except Exception as e:
+            logger.warning(f"mnemosyne MCP tool loading failed: {e}")
+            mcp_tools = []
+    else:
+        logger.info("MNEMOSYNE_ENABLED not set; agent runs without MCP memory tools")
+
     # Create the agent with LocalShellBackend
     # The Firecracker VM IS the sandbox, so unrestricted shell is safe.
     # deepagents >=0.6 renamed the working-directory arg from `cwd` to `root_dir`.
-    agent = create_deep_agent(
+    deep_agent_kwargs = dict(
         model=model,
         backend=LocalShellBackend(
             root_dir="/home/agent/workspace",
         ),
         system_prompt=system_prompt,
     )
+    if mcp_tools:
+        deep_agent_kwargs["tools"] = mcp_tools
+
+    agent = create_deep_agent(**deep_agent_kwargs)
 
     return agent
 

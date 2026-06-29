@@ -78,6 +78,19 @@ if [[ -n "${LLM_HOST:-}" && -n "${LLM_HOST_IP:-}" && "${LLM_HOST}" != "${LLM_HOS
     log "Mapping ${LLM_HOST} -> ${LLM_HOST_IP} for the container."
 fi
 
+# Map the shared mnemosyne agent-memory service for the container. It runs on the
+# sandbox HOST, reachable at the VM's gateway IP; the VM's /etc/hosts entry is NOT
+# inherited under --network host, so pin mnemosyne.host -> gateway explicitly.
+if [[ "${MNEMOSYNE_ENABLED:-0}" == "1" ]]; then
+    gw=$(ip route | awk '/^default/{print $3}')
+    if [[ -n "${gw}" ]]; then
+        ADD_HOST+=(--add-host "mnemosyne.host:${gw}")
+        log "Mapping mnemosyne.host -> ${gw} for the container."
+    else
+        log "WARNING: MNEMOSYNE_ENABLED=1 but no default gateway found; mnemosyne.host unmapped."
+    fi
+fi
+
 # --- Run the container ---
 # --network host => binds the VM's 0.0.0.0:${GATEWAY_PORT} directly (avoids the
 # docker0 bridge / iptables 'raw' table problem on the stock guest kernel).
