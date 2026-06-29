@@ -146,6 +146,9 @@ cmd_build_agent() {
     mount_point=$(mktemp -d)
 
     cleanup() {
+        # Guard against an early failure (e.g. before mount) firing the EXIT trap
+        # with mount_point unset under `set -u` — and never umount a bare path.
+        [ -n "${mount_point:-}" ] || return 0
         umount -lf "${mount_point}/tmp"     2>/dev/null || true
         umount -lf "${mount_point}/sys"     2>/dev/null || true
         umount -lf "${mount_point}/proc"    2>/dev/null || true
