@@ -99,7 +99,7 @@ log "XFCE4 started"
 
 # --- Load agent configuration ---
 AGENT_CONF="/etc/agent.conf"
-if [[ -f "${AGENT_CONF}" ]]; then
+if [ -f "${AGENT_CONF}" ]; then    # POSIX test — this script runs under /bin/sh
     log "Loading agent configuration from ${AGENT_CONF}"
     . "${AGENT_CONF}"
 else

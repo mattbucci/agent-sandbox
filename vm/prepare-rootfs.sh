@@ -103,12 +103,17 @@ if [[ "${HARNESS:-deepagents}" == "hermes" ]]; then
 
     # LLM provider config consumed by the hermes-agent container at /opt/data.
     mkdir -p "${MOUNT_POINT}/opt/hermes/data"
+    # context_length: hermes-agent refuses models advertising <64K context, and
+    # the router does not report a real window for custom providers (defaults to
+    # 8192). Override to the backing model's real window (gemma 3 = 128K). Adjust
+    # via HERMES_CONTEXT_LENGTH if you point hermes at a smaller-context model.
     cat > "${MOUNT_POINT}/opt/hermes/data/config.yaml" <<EOF
 model:
   default: ${LLM_MODEL}
   provider: custom
   base_url: ${LLM_API_BASE}
   api_key: ${LLM_API_KEY}
+  context_length: ${HERMES_CONTEXT_LENGTH:-131072}
 EOF
 
     # Disable docker's iptables management so dockerd comes up on the stock
