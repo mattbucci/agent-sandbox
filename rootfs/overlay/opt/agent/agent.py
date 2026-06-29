@@ -88,6 +88,7 @@ def create_agent():
     """Create and configure the DeepAgents agent."""
     from deepagents import create_deep_agent
     from deepagents.backends import LocalShellBackend
+    from langchain_openai import ChatOpenAI
 
     api_base = os.environ.get("LLM_API_BASE", "http://localhost:4000/v1")
     api_key = os.environ.get("LLM_API_KEY", "sk-default")
@@ -105,12 +106,24 @@ def create_agent():
     system_prompt = load_system_prompt()
     logger.info(f"System prompt loaded ({len(system_prompt)} chars)")
 
+    # Build the model explicitly with use_responses_api=False: the LLM router
+    # implements /v1/chat/completions (+ /v1/messages), NOT the OpenAI Responses
+    # API (/v1/responses). deepagents' default "openai:<model>" init uses the
+    # Responses API, which 404s against the router — so pin chat-completions.
+    model = ChatOpenAI(
+        model=model_name,
+        base_url=api_base,
+        api_key=api_key,
+        use_responses_api=False,
+    )
+
     # Create the agent with LocalShellBackend
-    # The Firecracker VM IS the sandbox, so unrestricted shell is safe
+    # The Firecracker VM IS the sandbox, so unrestricted shell is safe.
+    # deepagents >=0.6 renamed the working-directory arg from `cwd` to `root_dir`.
     agent = create_deep_agent(
-        model=f"openai:{model_name}",
+        model=model,
         backend=LocalShellBackend(
-            cwd="/home/agent/workspace",
+            root_dir="/home/agent/workspace",
         ),
         system_prompt=system_prompt,
     )

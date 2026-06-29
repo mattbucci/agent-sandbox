@@ -136,8 +136,12 @@ def compile_customize_sh(agent: dict) -> str:
         lines.append("")
 
     if pip_packages:
+        # The base image ships uv (no system pip/pip3), so install capability
+        # pip packages into the system python via uv. --system targets the
+        # system environment; --break-system-packages tolerates Ubuntu's
+        # PEP668 marker in the chroot.
         lines.append("echo 'Installing pip packages...'")
-        lines.append("pip3 install \\")
+        lines.append("uv pip install --system --break-system-packages \\")
         lines.append("    " + " \\\n    ".join(sorted(pip_packages)))
         lines.append("")
 
