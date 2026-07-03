@@ -93,6 +93,16 @@ MNEMOSYNE_TOKEN="${MNEMOSYNE_TOKEN:-}"
 MNEMOSYNE_URL="${MNEMOSYNE_URL:-}"
 EOF
 
+# OTel: the collector runs on the host; the VM reaches it at its gateway IP.
+# GATEWAY_IP is exported by launch.sh. Without this, agent.py's init_tracing()
+# finds no endpoint and disables tracing (the collector + in-VM span code exist
+# but never received anything). Firewall allows VM->host on 4317/4318.
+if [[ -n "${GATEWAY_IP:-}" ]]; then
+    cat >> "${MOUNT_POINT}/etc/agent.conf" <<EOF
+OTEL_EXPORTER_OTLP_ENDPOINT="http://${GATEWAY_IP}:4318"
+EOF
+fi
+
 # /etc/hosts entry for the internal LLM endpoint. agent-init rewrites /etc/hosts
 # at boot, so we stage extras in /etc/agent-hosts which it appends. Skip when the
 # host is already an IP literal or could not be resolved.

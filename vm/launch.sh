@@ -69,17 +69,20 @@ echo "  vCPUs: ${VCPUS}, RAM: ${MEM_MB}MB"
 VM_STATE_DIR="${STATE_DIR}/vms/${INSTANCE_ID}"
 mkdir -p "${VM_STATE_DIR}"
 
-# --- 2. Prepare rootfs ---
-echo "[1/7] Preparing rootfs..."
-"${SANDBOX_ROOT}/vm/prepare-rootfs.sh" "${AGENT_TYPE}" "${INSTANCE_ID}" "${VM_STATE_DIR}"
-
-# --- 3. Create TAP device ---
-echo "[2/7] Creating TAP device..."
+# Network addressing is derived from the slot; compute it here (before rootfs
+# prep) so prepare-rootfs can bake the per-VM gateway IP into agent.conf — the
+# OTel collector lives on the host and the VM reaches it at its gateway IP.
 TAP_NAME="tap-vm${SLOT}"
 VM_IP="${VM_SUBNET_PREFIX}.${SLOT}.2"
 GATEWAY_IP="${VM_SUBNET_PREFIX}.${SLOT}.1"
 DNS_IP="${GATEWAY_IP}"
 
+# --- 2. Prepare rootfs ---
+echo "[1/7] Preparing rootfs..."
+GATEWAY_IP="${GATEWAY_IP}" "${SANDBOX_ROOT}/vm/prepare-rootfs.sh" "${AGENT_TYPE}" "${INSTANCE_ID}" "${VM_STATE_DIR}"
+
+# --- 3. Create TAP device ---
+echo "[2/7] Creating TAP device..."
 create_tap "${TAP_NAME}" "${GATEWAY_IP}"
 
 # --- 4. Add nftables rules ---

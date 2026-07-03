@@ -222,15 +222,17 @@ async def _traced(coro, carrier, attrs):
     if not _OTEL_AVAILABLE:
         return await coro
     parent_ctx = _otel_extract(carrier)
-    token = otel_context.attach(parent_ctx) if parent_ctx is not None else None
-    try:
-        tracer = otel_trace.get_tracer("hermes.gateway_server")
-        with tracer.start_as_current_span("agent.chat", kind=_OtelSpanKind.SERVER,
-                                          attributes=attrs):
-            return await coro
-    finally:
-        if token is not None:
-            otel_context.detach(token)
+    # Parent the SERVER span by passing the inbound context to
+    # start_as_current_span(context=...) rather than attach()ing it ourselves.
+    # The agent invocation inside `await coro` spawns its own async tasks and
+    # mutates the OTel context, so a manual attach()/detach() pair straddling the
+    # await raised "Token was created in a different Context" at detach time —
+    # non-fatal, but it logged a traceback on every request. Scoping the parent
+    # to the span's own context manager removes the stray token entirely.
+    tracer = otel_trace.get_tracer("hermes.gateway_server")
+    with tracer.start_as_current_span("agent.chat", context=parent_ctx,
+                                      kind=_OtelSpanKind.SERVER, attributes=attrs):
+        return await coro
 
 
 # ---------------------------------------------------------------------------
