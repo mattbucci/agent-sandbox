@@ -10,6 +10,9 @@
 #   4. realtime dispatch  — north   (coder agent; verifies the cohere model)
 #   5. scheduled dispatch           (ygg task -> hermes back -> scheduler -> run show)
 #   6. tracing end-to-end           (one trace links gateway + in-VM agent spans)
+#   7. cancellation                 (ygg hermes cancel of a running task)
+#   8. graceful failure handling    (scheduled task to a bogus agent -> crashed)
+#   9. queue backpressure           (concurrency-1 agent -> sync 429/503)
 #
 # Read-only and idempotent apart from the tasks it creates (which close
 # themselves). Safe to re-run. Exits non-zero if any assertion fails.
@@ -18,6 +21,7 @@
 #   test/e2e-orchestrator.sh                 # run everything
 #   NORTH_AGENT=coder GEMMA_AGENT=feature-dev test/e2e-orchestrator.sh
 #   SKIP_SCHEDULED=1 SKIP_TRACING=1 test/e2e-orchestrator.sh
+#   SKIP_CANCEL / SKIP_FAILURE / SKIP_BACKPRESSURE=1   # skip a new section
 #
 # Env overrides:
 #   YGG              path to the ygg binary            (default: PATH, then target/release)
@@ -89,6 +93,25 @@ hermes_wait() {
         sleep 5
     done
     echo "${st:-timeout}"
+}
+
+# echo "<run_state>|<task_status>" for the most recent hermes-backed run in the
+# isolated DB, read-only. The DB is the source of truth for the scheduled and
+# failure sections (decoupled from `ygg task show` text). Empty fields on error.
+read_state() {
+    python3 <<'PY' 2>/dev/null
+import os,sqlite3
+db=os.path.expanduser(os.environ["YGG_DB_PATH"])
+try:
+    c=sqlite3.connect(f"file:{db}?mode=ro",uri=True,timeout=5)
+    r=c.execute("SELECT run_id,task_id,state FROM task_runs WHERE backend='hermes' "
+                "ORDER BY created_at DESC LIMIT 1").fetchone()
+    if not r: print("|"); raise SystemExit
+    t=c.execute("SELECT status FROM tasks WHERE task_id=?",(r[1],)).fetchone()
+    print(f"{r[2]}|{t[0] if t else ''}")
+except Exception:
+    print("|")
+PY
 }
 
 # --- preflight ----------------------------------------------------------------
@@ -171,22 +194,6 @@ else
         # BOTH the run state and the parent task status — decoupled from any
         # `ygg task show` text/exit-code fragility. Reconcile + finalize run in
         # the same tick, so the parent closes right after the run goes terminal.
-        # Reads the isolated DB read-only via a heredoc that prints "run|task".
-        read_state() {
-            python3 <<'PY' 2>/dev/null
-import os,sqlite3
-db=os.path.expanduser(os.environ["YGG_DB_PATH"])
-try:
-    c=sqlite3.connect(f"file:{db}?mode=ro",uri=True,timeout=5)
-    r=c.execute("SELECT run_id,task_id,state FROM task_runs WHERE backend='hermes' "
-                "ORDER BY created_at DESC LIMIT 1").fetchone()
-    if not r: print("|"); raise SystemExit
-    t=c.execute("SELECT status FROM tasks WHERE task_id=?",(r[1],)).fetchone()
-    print(f"{r[2]}|{t[0] if t else ''}")
-except Exception:
-    print("|")
-PY
-        }
         deadline=$((SECONDS + TASK_TIMEOUT_S)); runstate=""; taskstatus=""
         while (( SECONDS < deadline )); do
             "${YGG}" scheduler tick >/dev/null 2>&1
@@ -275,6 +282,98 @@ print('MODELS ' + ','.join(sorted(m for m in models if m)))
                 || skip "did not observe model '${NORTH_MODEL}' in this window (gen_ai attr may be absent)"
         fi
     fi
+fi
+
+# --- 7. cancellation ----------------------------------------------------------
+if [[ "${SKIP_CANCEL:-0}" == "1" ]]; then
+    section "7. cancellation"; skip "SKIP_CANCEL=1"
+else
+    section "7. cancellation (ygg hermes cancel of a running task)"
+    TIDC="$(hermes_submit "${NORTH_AGENT}" "Write a detailed 25-line Python class implementing a bounded stack with docstrings and type hints, then explain each method.")"
+    if [[ -z "${TIDC}" ]]; then
+        fail "cancel: submit returned no task id"
+    else
+        info "task ${TIDC}"
+        # Wait until it is actually running so we exercise a real teardown rather
+        # than an idempotent no-op on an already-terminal task.
+        st=""; running=0
+        for _ in $(seq 1 15); do
+            st="$("${YGG}" hermes show "${TIDC}" --json 2>/dev/null | json_get "['state']")"
+            [[ "${st}" == "running" ]] && { running=1; break; }
+            case "${st}" in succeeded|failed|expired|cancelled) break;; esac
+            sleep 2
+        done
+        if (( running == 0 )); then
+            skip "task reached '${st}' before we could catch it running (agent too fast)"
+        else
+            "${YGG}" hermes cancel "${TIDC}" >/dev/null 2>&1
+            final=""
+            for _ in $(seq 1 10); do
+                final="$("${YGG}" hermes show "${TIDC}" --json 2>/dev/null | json_get "['state']")"
+                case "${final}" in cancelled|succeeded|failed|expired) break;; esac
+                sleep 2
+            done
+            [[ "${final}" == "cancelled" ]] && pass "running task transitioned to cancelled" \
+                || fail "expected cancelled after cancel, got '${final}'"
+        fi
+    fi
+fi
+
+# --- 8. graceful failure handling --------------------------------------------
+if [[ "${SKIP_FAILURE:-0}" == "1" ]]; then
+    section "8. graceful failure handling"; skip "SKIP_FAILURE=1"
+else
+    section "8. graceful failure — scheduled task to a bogus agent"
+    REFF="$("${YGG}" task create "this hermes-backed task targets a nonexistent agent and must fail cleanly" --kind task -p 1 --json 2>/dev/null | json_get "['ref']")"
+    if [[ -z "${REFF}" ]]; then
+        fail "failure: task create returned no ref"
+    else
+        info "task ${REFF} -> hermes:__nonexistent_agent__"
+        "${YGG}" hermes back "${REFF}" --agent __nonexistent_agent__ >/dev/null 2>&1
+        # The scheduler should dispatch, get a hard rejection from the gateway
+        # (unknown agent), mark the run crashed, and drive the task to a terminal
+        # status — without hanging or spin-retrying a permanent config error.
+        deadline=$((SECONDS + 90)); fst=""; ftask=""
+        while (( SECONDS < deadline )); do
+            "${YGG}" scheduler tick >/dev/null 2>&1
+            sleep 3
+            IFS='|' read -r fst ftask <<<"$(read_state)"
+            [[ -n "${ftask}" && "${ftask}" != "open" ]] && break
+        done
+        case "${fst}" in
+            crashed|failed|poison) pass "bad-agent dispatch marked the run '${fst}' (handled, not hung)";;
+            *) fail "expected run crashed/failed, got '${fst:-none}'";;
+        esac
+        case "${ftask}" in
+            closed|blocked) pass "task reached terminal status '${ftask}' after the failure";;
+            *) fail "task did not reach terminal (status=${ftask:-none})";;
+        esac
+    fi
+fi
+
+# --- 9. queue backpressure ----------------------------------------------------
+if [[ "${SKIP_BACKPRESSURE:-0}" == "1" ]]; then
+    section "9. queue backpressure"; skip "SKIP_BACKPRESSURE=1"
+else
+    section "9. queue backpressure (concurrency-1 agent -> sync 429)"
+    # ygg uses the async task API; sync backpressure (429 queue-full / 503
+    # wait-timeout) lives on /v1/chat/completions, so drive it with curl. With
+    # per-agent concurrency 1 and sync_queue_max 4, one runs + four queue and the
+    # rest are rejected 429. Fire N concurrent and expect both 200s and 429s.
+    N="${BACKPRESSURE_N:-8}"; codes="$(mktemp)"; : > "${codes}"
+    for _ in $(seq 1 "${N}"); do
+        ( curl -s -o /dev/null -w "%{http_code}\n" --max-time 120 \
+            -H "Authorization: Bearer ${HERMES_GATEWAY_TOKEN}" -H "Content-Type: application/json" \
+            -d "{\"model\":\"${GEMMA_AGENT}\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"say hi\"}]}" \
+            "${GATEWAY_URL}/v1/chat/completions" >> "${codes}" ) &
+    done
+    wait
+    n200=$(grep -c '^200$' "${codes}" || true); n429=$(grep -c '^429$' "${codes}" || true)
+    n503=$(grep -c '^503$' "${codes}" || true); rm -f "${codes}"
+    info "of ${N} concurrent sync requests: ${n200}x200, ${n429}x429, ${n503}x503"
+    (( n200 >= 1 )) && pass "some requests were served (agent ran them serially)" || fail "no 200 responses"
+    (( n429 + n503 >= 1 )) && pass "over-capacity requests got 429/503 (backpressure enforced)" \
+        || fail "expected at least one 429/503 with ${N} concurrent requests"
 fi
 
 # --- summary ------------------------------------------------------------------
