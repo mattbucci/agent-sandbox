@@ -84,6 +84,11 @@ gateway:
     devops:      { api_server_key: "" }
     researcher:  { api_server_key: "" }
     security:    { api_server_key: "" }
+    # Coding specialist pinned to a code model. config/agents/coder.yaml sets
+    # `vm.model: north`, so this agent's LLM_MODEL is the North-Mini-Code model
+    # on the LAN router while every other agent stays on the global llm.model.
+    # Route coding tasks here (e.g. `ygg hermes back <ref> --agent coder`).
+    coder:       { api_server_key: "" }
     # Real NousResearch/hermes-agent v2026.6.19 (Docker, pre-baked into the VM).
     # Its in-VM API server requires this bearer; the router presents it downstream.
     # `model` rewrites the outgoing OpenAI model field (the agent id "hermes") to a

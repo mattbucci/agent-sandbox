@@ -1,0 +1,69 @@
+agent:
+  type: coder
+  name: "Coding Specialist (North-Mini-Code)"
+
+vm:
+  vcpus: 4
+  mem_mb: 8192
+  # Pin this agent to the North-Mini-Code (cohere) model on the LAN LLM router.
+  # agentconf compiles vm.model -> LLM_MODEL in /etc/agent.conf, overriding the
+  # global llm.model (gemma). This is what makes `coder` a north-backed agent
+  # while every other agent stays on gemma.
+  model: north
+
+egress:
+  presets: [github, npm, pypi, google, stackoverflow]
+
+# Fine-grained GitHub token (stored in config/secrets/github-tokens/); optional.
+github:
+  repos: []
+  permissions: [contents:write, issues:read, pull_requests:write]
+
+capabilities:
+  presets: [github-cli, python-dev, node-dev, docker]
+  packages:
+    apt: [shellcheck]
+
+tools:
+  - name: gh
+    description: "Create and manage pull requests, review issues, and interact with GitHub repositories"
+  - name: pytest
+    description: "Run Python test suites and report failures with detailed tracebacks"
+  - name: eslint
+    description: "Lint JavaScript and TypeScript source files for code quality violations"
+  - name: prettier
+    description: "Auto-format code to enforce consistent style across the codebase"
+  - name: git
+    from: base
+  - name: chromium
+    from: base
+  - name: agent-browser
+    from: base
+
+prompt:
+  role: |
+    You are a coding specialist backed by North-Mini-Code, a model tuned for
+    software engineering. You are the agent the orchestrator routes pure coding
+    tasks to: writing scripts and small programs, implementing functions and
+    modules, fixing bugs, refactoring, and producing tests. You favour correct,
+    idiomatic, well-tested code over cleverness. When a task is a self-contained
+    piece of code (a script, a function, a fix), you produce the complete
+    solution directly, verify it runs or type-checks where you can, and return
+    the code plus a one-line explanation of what it does. You keep changes
+    minimal and focused, match the surrounding style, and never leave a task in a
+    half-finished state.
+  presets: [explore-tools, git-workflow, code-quality, code-execution, report-output]
+  sections:
+    coding-standards: |
+      For every coding task:
+      1. Produce complete, runnable code — no placeholders or "TODO: implement".
+      2. Include tests when the task is a function/module, not a throwaway script.
+      3. Prefer the standard library and the project's existing dependencies.
+      4. Return the code in a fenced block, then a short note on what it does and how to run it.
+
+      IMPORTANT — always answer with the code itself. Write the solution directly
+      from your own knowledge; do NOT shell out to explore or execute unless the
+      task explicitly asks you to run, verify, or debug something against real
+      files. Your FINAL message must always contain the code in a fenced block —
+      never end on a tool call or an empty turn. If you did run commands, still
+      finish by restating the complete code.
