@@ -193,11 +193,11 @@ in-VM server requires no auth and no header is sent.
 
 ## Wire contract
 
-The router exposes exactly the legacy default `/v1/chat/completions` path that
-`hermes-webui` expects (runs-API off; richer tool/approval events are not
-implemented).
+The router exposes the legacy `/v1/chat/completions` path plus the **runs API**
+(interactive dangerous-command approval — see [Runs API](#runs-api-interactive-approval)).
+`/v1/capabilities` advertises per-agent whether the runs path is available.
 
-**These four paths are unchanged and byte-compatible** — same bodies, SSE
+**The chat paths are unchanged and byte-compatible** — same bodies, SSE
 framing, 401/403/502 envelopes, and `X-Hermes-Session-Id`/`-Key` passthrough —
 across the scheduling/tasks/observability upgrade. The only additions on the
 chat path are **saturation-only**: a request may wait in the agent's queue, and
@@ -205,12 +205,17 @@ a saturated agent returns `429` (queue full) or `503` (wait timeout), both with
 `Retry-After` (see [Scheduling & backpressure](#scheduling--backpressure)). The
 router also sends a `traceparent` header downstream, which both backends ignore.
 
-| Method | Path                   | Auth | Returns |
-|--------|------------------------|------|---------|
-| GET    | `/health`              | no   | `{"status":"ok"}` |
-| GET    | `/v1/capabilities`     | no   | `{"features":{"approval_events":false,"run_approval_response":false}}` |
-| GET    | `/v1/models`           | yes  | `{"object":"list","data":[{"id":"<agent>","object":"model","owned_by":"hermes-gateway"}]}` |
-| POST   | `/v1/chat/completions` | yes  | streaming `text/event-stream` (or a single JSON object when `stream:false`) |
+| Method | Path                        | Auth | Returns |
+|--------|-----------------------------|------|---------|
+| GET    | `/health`                   | no   | `{"status":"ok"}` |
+| GET    | `/v1/capabilities?model=<a>`| no   | capabilities object; the run/approval features follow agent `<a>`'s `approval` config flag |
+| GET    | `/v1/models`                | yes  | `{"object":"list","data":[{"id":"<agent>","object":"model","owned_by":"hermes-gateway"}]}` |
+| POST   | `/v1/chat/completions`      | yes  | streaming `text/event-stream` (or a single JSON object when `stream:false`) |
+| POST   | `/v1/runs`                  | yes  | `202 {"run_id":"run_…","status":"started"}` — starts a run; router holds the agent's slot for its lifetime |
+| GET    | `/v1/runs/{id}`             | yes  | pollable run status |
+| GET    | `/v1/runs/{id}/events`      | yes  | `text/event-stream` of run lifecycle events (incl. `approval.request`) |
+| POST   | `/v1/runs/{id}/approval`    | yes  | resolve a pending approval: `{"choice":"once\|session\|always\|deny"}` |
+| POST   | `/v1/runs/{id}/stop`        | yes  | interrupt the run |
 
 **Request** (`POST /v1/chat/completions`):
 
@@ -257,6 +262,50 @@ the literal `data: [DONE]`.
 ```json
 {"error":{"message":"Invalid API key","type":"invalid_request_error"}}
 ```
+
+## Runs API (interactive approval)
+
+`hermes-webui` probes `GET /v1/capabilities` per chat; when the selected model
+advertises the runs feature it uses the **runs API** — a stateful run that
+**pauses to ask the user to approve a dangerous shell command**, then resumes.
+The gateway supports it for **both** backends: the real `hermes` container
+implements it natively, and the hand-rolled deepagents agents implement the same
+contract in-VM (`approvals.py` + `ApprovalShellBackend` + the run lifecycle in
+`gateway_server.py`). Whether an agent advertises it is the per-agent
+`gateway.agents.<name>.approval` flag (see [Configuration](#configuration)).
+
+A run is a **background task addressed by five endpoints across separate
+connections** (contract matches `nousresearch/hermes-agent:v2026.6.19`):
+
+1. `POST /v1/runs` — body `{"model":"<agent>","input":"…"}` (`input` is a string
+   or a message array). Returns **`202 {"run_id":"run_…","status":"started"}`**
+   immediately. The router resolves the agent from `model`, applies the same
+   auth/scope + admission control as chat (`429`/`503` when saturated), and
+   **holds the agent's slot for the whole run** — a background supervisor polls
+   the backend's status and releases the slot only on a terminal status
+   (`completed`/`failed`/`cancelled`) or a TTL. So a run and a chat can't clobber
+   the agent's single shell.
+2. `GET /v1/runs/{id}/events` — `text/event-stream` of lifecycle events, one
+   `data: {…}` per line: `run.started`, `message.delta`, `tool.started`/
+   `tool.completed`, **`approval.request`** (`{approval_id,command,description,
+   choices:["once","session","always","deny"]}`), `approval.responded`, and a
+   terminal `run.completed`/`run.failed`/`run.cancelled`; `: keepalive` comments
+   every 30s; the stream ends with `: stream closed`.
+3. `POST /v1/runs/{id}/approval` — body `{"choice":"once"|"session"|"always"|"deny"}`
+   (aliases `approve`/`allow` → `once`). `session`/`always` suppress re-prompting
+   for the rest of the run. Returns `{"object":"hermes.run.approval_response",…}`.
+   Acquires **no** slot — it feeds the already-running, paused run.
+4. `GET /v1/runs/{id}` — pollable status object `{"object":"hermes.run","status",…}`.
+5. `POST /v1/runs/{id}/stop` — interrupt the run.
+
+The router binds `run_id → VM` from the `202` and routes the follow-up endpoints
+to that same VM instance (the run's state lives there). The binding is
+**in-memory**: after a router restart an unknown run id `404`s. The danger policy
+(deepagents backend) is a conservative regex over the shell string (`rm -rf`,
+`dd`, `mkfs`, fork bombs, `sudo`, `curl | sh`, force-push, writes outside the
+workspace, …) in `approvals.is_dangerous`; a walked-away client defaults an
+un-answered approval to **deny** after a timeout. The approval flow is a webui UX
+affordance, **not** a security boundary — the Firecracker VM is the real sandbox.
 
 ## Scheduling & backpressure
 
@@ -527,7 +576,9 @@ The in-VM agent also reads `LLM_API_BASE`, `LLM_API_KEY`, and `LLM_MODEL`
 ## Pointing `hermes-webui` at the gateway
 
 Set these on the `hermes-webui` deployment (k3s) so it uses the gateway chat
-backend at the default legacy `/v1/chat/completions` path (runs-API off):
+backend. The webui auto-detects the [runs API](#runs-api-interactive-approval)
+per model via `/v1/capabilities`, so no extra config is needed to enable the
+approval flow for agents with `approval: true`:
 
 ```
 HERMES_WEBUI_CHAT_BACKEND=gateway
@@ -601,9 +652,11 @@ KEY=hgw_YOUR_GATEWAY_KEY
 curl -s $GW/health
 # {"status":"ok"}
 
-# Capabilities (no auth; legacy chat path, both flags false)
-curl -s $GW/v1/capabilities
-# {"features":{"approval_events":false,"run_approval_response":false}}
+# Capabilities (no auth; run/approval features follow the agent's `approval` flag)
+curl -s "$GW/v1/capabilities?model=hermes"
+# {"object":"hermes.api_server.capabilities","platform":"hermes-gateway","model":"hermes",
+#  "features":{"chat_completions":true,...,"approval_events":true,"run_approval_response":true,...}}
+curl -s "$GW/v1/capabilities?model=feature-dev"   # same shape; run flags true when approval:true
 
 # Models visible to this token's scope (auth required)
 curl -s -H "Authorization: Bearer $KEY" $GW/v1/models

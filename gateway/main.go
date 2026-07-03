@@ -44,6 +44,7 @@ type server struct {
 	mx        *Metrics
 	tracer    *Tracer
 	hist      *History
+	runs      *runRegistry
 	startedAt time.Time
 }
 
@@ -179,6 +180,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	registerRunsAPI(mux, s)
 	if s.cfg.TasksEnabled() && s.store != nil {
 		registerTasksAPI(mux, s)
 	}
@@ -316,13 +318,38 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleCapabilities advertises gateway features. We run the legacy chat path,
-// so both flags are false. No auth is required, but a token is accepted.
+// handleCapabilities advertises the gateway feature surface for the agent named
+// by the ?model= query (empty/"default" -> default_agent). The runs-API feature
+// block (interactive dangerous-command approval) mirrors the resolved agent's
+// static `approval` config flag: the webui probes this per chat to decide
+// whether to use the runs path for the selected model. An unknown or absent
+// model resolves the run features to false (safe default). No auth is required
+// (the webui probes before presenting a key), matching the legacy contract and
+// the real hermes-agent, whose capabilities object shape this mirrors.
 func (s *server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	agent := r.URL.Query().Get("model")
+	if agent == "" || agent == "default" {
+		agent = s.cfg.DefaultAgent
+	}
+	ac, known := s.cfg.Agents[agent]
+	approval := known && ac.Approval
+
 	writeJSON(w, http.StatusOK, map[string]any{
+		"object":   "hermes.api_server.capabilities",
+		"platform": "hermes-gateway",
+		"model":    agent,
 		"features": map[string]bool{
-			"approval_events":       false,
-			"run_approval_response": false,
+			// Baseline chat surface — always available on the gateway.
+			"chat_completions":           true,
+			"chat_completions_streaming": true,
+			// Runs API (proxied to the backend) — gated by the agent's flag.
+			"run_submission":        approval,
+			"run_status":            approval,
+			"run_events_sse":        approval,
+			"run_stop":              approval,
+			"run_approval_response": approval,
+			"tool_progress_events":  approval,
+			"approval_events":       approval,
 		},
 	})
 }

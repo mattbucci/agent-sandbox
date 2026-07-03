@@ -47,16 +47,7 @@ var httpClient = &http.Client{Timeout: 0}
 func buildVMRequest(ctx context.Context, cfg *Config, vm VMInfo, agent string, body []byte, sessionID, sessionKey, traceparent string) (*http.Request, error) {
 	target := fmt.Sprintf("http://%s:%d/v1/chat/completions", vm.VMIP, cfg.VMGatewayPort)
 
-	outBody := body
-	if ac, ok := cfg.Agents[agent]; ok && ac.Model != "" {
-		var m map[string]any
-		if json.Unmarshal(body, &m) == nil {
-			m["model"] = ac.Model
-			if rb, mErr := json.Marshal(m); mErr == nil {
-				outBody = rb
-			}
-		}
-	}
+	outBody := rewriteModelField(cfg, agent, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(outBody))
 	if err != nil {
@@ -81,6 +72,34 @@ func buildVMRequest(ctx context.Context, cfg *Config, vm VMInfo, agent string, b
 		req.Header.Set("Authorization", "Bearer "+ac.APIServerKey)
 	}
 	return req, nil
+}
+
+// rewriteModelField applies the per-agent model rewrite to a JSON request body:
+// the client's `model` field is the agent id (routing key), not an LLM model, so
+// when the agent declares a `model` we swap the field to a real model alias
+// before forwarding (black-box backends like the real hermes-agent read it).
+// Falls back to the original bytes when the agent has no model override or the
+// body can't be round-tripped as a JSON object (e.g. an empty/GET body) — so it
+// never injects a spurious `model` into a body that had none.
+func rewriteModelField(cfg *Config, agent string, body []byte) []byte {
+	ac, ok := cfg.Agents[agent]
+	if !ok || ac.Model == "" {
+		return body
+	}
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil || m == nil {
+		return body
+	}
+	if _, hasModel := m["model"]; !hasModel {
+		// The body carries no model field; don't add one (keeps approval/stop
+		// bodies untouched). Only rewrite an existing routing-key model.
+		return body
+	}
+	m["model"] = ac.Model
+	if rb, mErr := json.Marshal(m); mErr == nil {
+		return rb
+	}
+	return body
 }
 
 // emitSchedWaitSpan records the INTERNAL sched.wait span (§g), emitted only

@@ -107,9 +107,28 @@ func TestLegacyEndpointGoldens(t *testing.T) {
 	resp, body := apiDo(t, http.MethodGet, ts.URL+"/health", "", nil, nil)
 	assertJSONGolden(t, resp, body, 200, "{\"status\":\"ok\"}\n")
 
+	// Capabilities (no auth): rich object; default agent (feature-dev) has no
+	// approval flag, so every run/approval feature is false. Parsed rather than
+	// byte-golden because the object carries more than the two legacy flags.
 	resp, body = apiDo(t, http.MethodGet, ts.URL+"/v1/capabilities", "", nil, nil)
-	assertJSONGolden(t, resp, body, 200,
-		"{\"features\":{\"approval_events\":false,\"run_approval_response\":false}}\n")
+	if resp.StatusCode != 200 {
+		t.Fatalf("capabilities status = %d", resp.StatusCode)
+	}
+	{
+		var cap struct {
+			Object   string          `json:"object"`
+			Features map[string]bool `json:"features"`
+		}
+		if err := json.Unmarshal(body, &cap); err != nil {
+			t.Fatalf("capabilities decode: %v (%s)", err, body)
+		}
+		if cap.Object != "hermes.api_server.capabilities" {
+			t.Fatalf("capabilities object = %q", cap.Object)
+		}
+		if cap.Features["approval_events"] || cap.Features["run_approval_response"] {
+			t.Fatalf("default-agent approval flags should be false: %v", cap.Features)
+		}
+	}
 
 	// Models with the scoped token: deterministic single-agent list.
 	resp, body = apiDo(t, http.MethodGet, ts.URL+"/v1/models", scopedToken, nil, nil)

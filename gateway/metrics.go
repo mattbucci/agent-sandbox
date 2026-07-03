@@ -623,8 +623,23 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // pathLabel normalizes a request path to a bounded metric label set.
 func pathLabel(p string) string {
 	switch p {
-	case "/health", "/v1/capabilities", "/v1/models", "/v1/chat/completions", "/v1/tasks", "/metrics":
+	case "/health", "/v1/capabilities", "/v1/models", "/v1/chat/completions", "/v1/tasks", "/v1/runs", "/metrics":
 		return p
+	}
+	if strings.HasPrefix(p, "/v1/runs/") {
+		rest := p[len("/v1/runs/"):]
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			switch rest[i+1:] {
+			case "events":
+				return "/v1/runs/{id}/events"
+			case "approval":
+				return "/v1/runs/{id}/approval"
+			case "stop":
+				return "/v1/runs/{id}/stop"
+			}
+			return "/v1/runs/{id}/other"
+		}
+		return "/v1/runs/{id}"
 	}
 	if strings.HasPrefix(p, "/v1/tasks/") {
 		rest := p[len("/v1/tasks/"):]

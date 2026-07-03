@@ -78,22 +78,25 @@ gateway:
       agents: ["*"]
   agents:                  # exposed agent types + downstream per-VM key (may be "")
     # Optional per-agent `concurrency` overrides scheduler.default_concurrency
-    # (0/absent = default).
-    feature-dev: { api_server_key: "", concurrency: 1 }
-    debugger:    { api_server_key: "" }
-    devops:      { api_server_key: "" }
-    researcher:  { api_server_key: "" }
-    security:    { api_server_key: "" }
+    # (0/absent = default). Optional per-agent `approval: true` advertises the
+    # runs API (interactive dangerous-command approval) on /v1/capabilities, so
+    # the webui uses the runs path for that agent. Deepagents agents implement
+    # the runs lifecycle in-VM; the hermes container implements it natively.
+    feature-dev: { api_server_key: "", concurrency: 1, approval: true }
+    debugger:    { api_server_key: "", approval: true }
+    devops:      { api_server_key: "", approval: true }
+    researcher:  { api_server_key: "", approval: true }
+    security:    { api_server_key: "", approval: true }
     # Coding specialist pinned to a code model. config/agents/coder.yaml sets
     # `vm.model: north`, so this agent's LLM_MODEL is the North-Mini-Code model
     # on the LAN router while every other agent stays on the global llm.model.
     # Route coding tasks here (e.g. `ygg hermes back <ref> --agent coder`).
-    coder:       { api_server_key: "" }
+    coder:       { api_server_key: "", approval: true }
     # Real NousResearch/hermes-agent v2026.6.19 (Docker, pre-baked into the VM).
     # Its in-VM API server requires this bearer; the router presents it downstream.
     # `model` rewrites the outgoing OpenAI model field (the agent id "hermes") to a
     # real LLM alias before forwarding, so the container's API server accepts it.
-    hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma" }
+    hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma", approval: true }
 
 # Mnemosyne shared agent-memory service (MCP over SSE). Runs on the sandbox
 # HOST (bin/sandbox-ctl mnemosyne ...), bound 0.0.0.0:<port>; agent VMs reach it

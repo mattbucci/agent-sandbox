@@ -27,3 +27,6 @@ __pycache__/
 *~
 kernel/vmlinux.fcci.bak
 kernel/vmlinux.clang
+
+# Built gateway router binary (go build -o hermes-gateway .)
+gateway/hermes-gateway

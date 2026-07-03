@@ -19,13 +19,19 @@ import sys
 import asyncio
 import logging
 
+# Log to the agent log file plus stdout. The file path is overridable via
+# AGENT_LOG_FILE; if it can't be opened (e.g. host-side unit tests where
+# /var/log isn't writable) fall back to stdout-only instead of crashing at
+# import — importing this module must never hard-fail on the log sink.
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    _log_handlers.insert(0, logging.FileHandler(os.environ.get("AGENT_LOG_FILE", "/var/log/agent.log")))
+except OSError:
+    pass
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
-    handlers=[
-        logging.FileHandler("/var/log/agent.log"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("agent")
 
@@ -92,6 +98,52 @@ def init_tracing():
     return callbacks
 
 
+class ApprovalShellBackend:
+    """LocalShellBackend that gates dangerous commands behind the runs-API
+    approval flow.
+
+    Defined lazily as a subclass at first use (create_agent imports deepagents
+    there, keeping module import cheap). When a shell command runs INSIDE a run
+    (approvals.current_run is set) and is classified dangerous, execute() emits
+    an approval.request event and blocks until the client decides; a "deny"
+    returns a synthetic denied ExecuteResponse and never touches the shell. With
+    no run context (plain chat / task path) it is exactly LocalShellBackend, so
+    those paths are unchanged.
+
+    This is a thin factory returning the real subclass so `isinstance`/backend
+    protocol checks in deepagents still see a LocalShellBackend.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        from deepagents.backends import LocalShellBackend
+        from deepagents.backends.protocol import ExecuteResponse
+        import approvals
+
+        class _ApprovalShellBackend(LocalShellBackend):
+            def execute(self, command, *, timeout=None):
+                run = approvals.current_run.get()
+                if run is None:
+                    return super().execute(command, timeout=timeout)
+                preview = (command or "")[:200]
+                run.emit({"event": "tool.started", "tool": "shell", "preview": preview})
+                if approvals.is_dangerous(command):
+                    choice = run.request_approval(command)
+                    if choice == "deny":
+                        run.emit({"event": "tool.completed", "tool": "shell",
+                                  "error": True, "denied": True})
+                        return ExecuteResponse(
+                            output="Command denied by user via the approval flow.",
+                            exit_code=126,
+                            truncated=False,
+                        )
+                result = super().execute(command, timeout=timeout)
+                run.emit({"event": "tool.completed", "tool": "shell",
+                          "error": bool(getattr(result, "exit_code", 0))})
+                return result
+
+        return _ApprovalShellBackend(*args, **kwargs)
+
+
 def load_system_prompt() -> str:
     """Load the agent's system prompt from /etc/agent/system-prompt.md"""
     prompt_path = "/etc/agent/system-prompt.md"
@@ -139,7 +191,6 @@ def create_agent(callbacks=None):
     LangGraph run tree is traced.
     """
     from deepagents import create_deep_agent
-    from deepagents.backends import LocalShellBackend
     from langchain_openai import ChatOpenAI
 
     api_base = os.environ.get("LLM_API_BASE", "http://localhost:4000/v1")
@@ -183,12 +234,15 @@ def create_agent(callbacks=None):
     else:
         logger.info("MNEMOSYNE_ENABLED not set; agent runs without MCP memory tools")
 
-    # Create the agent with LocalShellBackend
-    # The Firecracker VM IS the sandbox, so unrestricted shell is safe.
+    # Create the agent with ApprovalShellBackend (a LocalShellBackend that gates
+    # dangerous commands behind the runs-API approval flow when executing inside
+    # a run; identical to LocalShellBackend on the chat/task paths). The
+    # Firecracker VM IS the sandbox, so unrestricted shell is safe; the approval
+    # gate is a UX affordance for the webui, not a security boundary.
     # deepagents >=0.6 renamed the working-directory arg from `cwd` to `root_dir`.
     deep_agent_kwargs = dict(
         model=model,
-        backend=LocalShellBackend(
+        backend=ApprovalShellBackend(
             root_dir="/home/agent/workspace",
         ),
         system_prompt=system_prompt,

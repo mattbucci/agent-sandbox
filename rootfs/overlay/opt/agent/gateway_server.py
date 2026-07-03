@@ -37,6 +37,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # on sys.path[0] because start.sh execs this file by absolute path.
 from agent import create_agent, init_tracing
 
+# Run approval gate + registry (the runs-API interactive dangerous-command
+# approval flow). No heavy deps; inert on the chat/task paths.
+import approvals
+
 # Guarded OTel imports: with opentelemetry absent every tracing hook below
 # degrades to a no-op and the wire behaviour is unchanged.
 try:
@@ -209,6 +213,91 @@ def run_coro(coro):
     return asyncio.run_coroutine_threadsafe(coro, get_loop()).result()
 
 
+# ---------------------------------------------------------------------------
+# Runs API (interactive dangerous-command approval) — background run driver.
+#
+# A run is a background task on the persistent loop addressed by five endpoints
+# across separate connections (POST /v1/runs, GET /v1/runs/{id}[/events],
+# POST /v1/runs/{id}/{approval,stop}). The agent is driven with ag.ainvoke on
+# the loop; its (sync) shell tool runs in a langchain executor THREAD, where
+# ApprovalShellBackend blocks on the approval gate — so a paused run never
+# blocks the loop, and the /events SSE + approval POST stay serviceable.
+# ---------------------------------------------------------------------------
+
+# Sentinel the events drain returns when a get() times out (send an SSE comment
+# keepalive rather than closing). None is the distinct end-of-stream sentinel.
+_KEEPALIVE = object()
+
+
+async def _create_run_queue():
+    return asyncio.Queue()
+
+
+def _make_run_queue(loop):
+    """Create the run's asyncio.Queue ON the loop thread so it binds correctly."""
+    return asyncio.run_coroutine_threadsafe(_create_run_queue(), loop).result()
+
+
+async def _next_run_event(q, timeout):
+    """Await the next run event, or _KEEPALIVE after `timeout` seconds idle."""
+    try:
+        return await asyncio.wait_for(q.get(), timeout)
+    except asyncio.TimeoutError:
+        return _KEEPALIVE
+
+
+async def _drive_run(ctx, user_message, session_id):
+    """Drive one run to completion, emitting lifecycle events to ctx.queue.
+
+    current_run is set for the duration of ag.ainvoke so ApprovalShellBackend
+    (running the shell tool in a copied-context executor thread) can find this
+    run and gate dangerous commands. Session history is threaded exactly like
+    the chat path, so a run continues a conversation the same way.
+    """
+    ctx.set_status("running")
+    ctx.emit({"event": "run.started"})
+    history = _session_history(session_id)
+    new_user = {"role": "user", "content": user_message}
+    agent_input = {"messages": history + [new_user]}
+    try:
+        ag = get_agent()
+        token = approvals.current_run.set(ctx)
+        try:
+            result = await ag.ainvoke(agent_input)
+        finally:
+            approvals.current_run.reset(token)
+        text = _final_content(result)
+        usage = _extract_usage(result) or {}
+        _session_append(session_id, history,
+                        [new_user, {"role": "assistant", "content": text}])
+        if text:
+            ctx.emit({"event": "message.delta", "delta": text})
+        ctx.set_status("completed", output=text, usage=usage)
+        ctx.emit({"event": "run.completed", "output": text, "usage": usage})
+    except asyncio.CancelledError:
+        ctx.set_status("cancelled")
+        ctx.emit({"event": "run.cancelled"})
+        raise
+    except Exception as e:  # noqa: BLE001 — surface any run failure as an event
+        logger.exception("run %s failed", ctx.run_id)
+        ctx.set_status("failed", error=str(e))
+        ctx.emit({"event": "run.failed", "error": str(e)})
+    finally:
+        ctx.close()  # sentinel -> the events SSE ends
+
+
+async def _run_sweeper():
+    """Periodically drop terminal runs past their retention window."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            n = approvals.sweep_terminal()
+            if n:
+                logger.info("swept %d terminal run(s)", n)
+        except Exception:
+            logger.debug("run sweeper error", exc_info=True)
+
+
 async def _traced(coro, carrier, attrs):
     """Await `coro` inside a SERVER "agent.chat" span.
 
@@ -363,8 +452,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         # /v1/capabilities is intentionally unauthenticated (matches the router and
         # the documented contract: the webui probes it before presenting a key).
+        # This harness now implements the full runs API, so the run/approval
+        # features are advertised true. (The host router's static per-agent
+        # `approval` config is the client-facing source of truth; this keeps a
+        # direct VM probe honest and mirrors the real hermes-agent shape.)
         if path == "/v1/capabilities":
-            self._send_json(200, {"features": {"approval_events": False, "run_approval_response": False}})
+            self._send_json(200, {
+                "object": "hermes.api_server.capabilities",
+                "platform": "hermes-agent",
+                "model": AGENT_TYPE,
+                "features": {
+                    "chat_completions": True,
+                    "chat_completions_streaming": True,
+                    "run_submission": True,
+                    "run_status": True,
+                    "run_events_sse": True,
+                    "run_stop": True,
+                    "run_approval_response": True,
+                    "tool_progress_events": True,
+                    "approval_events": True,
+                },
+            })
             return
         if path.startswith("/v1/") and not self._authed():
             return
@@ -372,16 +480,164 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"object": "list", "data": [
                 {"id": AGENT_TYPE, "object": "model", "owned_by": "hermes-gateway"}]})
             return
+        if path.startswith("/v1/runs/"):
+            run_id, _, action = path[len("/v1/runs/"):].partition("/")
+            if action == "":
+                self._handle_run_status(run_id)
+                return
+            if action == "events":
+                self._handle_run_events(run_id)
+                return
         self._send_json(404, {"error": {"message": "Not found", "type": "invalid_request_error"}})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/v1/") and not self._authed():
             return
-        if path != "/v1/chat/completions":
-            self._send_json(404, {"error": {"message": "Not found", "type": "invalid_request_error"}})
+        if path == "/v1/chat/completions":
+            self._handle_chat()
             return
-        self._handle_chat()
+        if path == "/v1/runs":
+            self._handle_run_create()
+            return
+        if path.startswith("/v1/runs/"):
+            run_id, _, action = path[len("/v1/runs/"):].partition("/")
+            if action == "approval":
+                self._handle_run_approval(run_id)
+                return
+            if action == "stop":
+                self._handle_run_stop(run_id)
+                return
+        self._send_json(404, {"error": {"message": "Not found", "type": "invalid_request_error"}})
+
+    # ---- runs API (interactive approval) ----
+    def _read_json_body(self):
+        """Read and parse a JSON request body. Returns (obj, err_message)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        if not raw:
+            return {}, None
+        try:
+            return json.loads(raw.decode("utf-8")), None
+        except (ValueError, UnicodeDecodeError):
+            return None, "Invalid JSON body"
+
+    def _run_not_found(self, run_id):
+        self._send_json(404, {"error": {
+            "message": f"Run not found: {run_id}", "type": "invalid_request_error"}})
+
+    def _handle_run_create(self):
+        """POST /v1/runs — start a background run, return run_id immediately (202)."""
+        body, err = self._read_json_body()
+        if err:
+            self._send_json(400, {"error": {"message": err, "type": "invalid_request_error"}})
+            return
+        raw_input = body.get("input")
+        if isinstance(raw_input, list):
+            last = raw_input[-1] if raw_input else {}
+            user_message = last.get("content", "") if isinstance(last, dict) else str(last)
+        else:
+            user_message = raw_input or ""
+        if not user_message:
+            self._send_json(400, {"error": {"message": "Missing 'input' field", "type": "invalid_request_error"}})
+            return
+        req_model = body.get("model") or ""
+        resp_model = AGENT_TYPE if req_model in ("", "default") else req_model
+        sid = self.headers.get("X-Hermes-Session-Id") or body.get("session_id") or None
+
+        run_id = "run_" + uuid.uuid4().hex
+        loop = get_loop()
+        q = _make_run_queue(loop)
+        ctx = approvals.RunContext(run_id, loop, q, session_id=sid, model=resp_model)
+        approvals.register_run(ctx)
+        session_id = ctx.snapshot_status()["session_id"]
+        ctx.task_future = asyncio.run_coroutine_threadsafe(
+            _drive_run(ctx, user_message, session_id), loop)
+        logger.info("run %s started session=%s model=%s", run_id, session_id, resp_model)
+        self._send_json(202, {"run_id": run_id, "status": "started"})
+
+    def _handle_run_status(self, run_id):
+        """GET /v1/runs/{id} — pollable run status."""
+        ctx = approvals.get_run(run_id)
+        if ctx is None:
+            self._run_not_found(run_id)
+            return
+        self._send_json(200, ctx.snapshot_status())
+
+    def _handle_run_events(self, run_id):
+        """GET /v1/runs/{id}/events — SSE stream of run lifecycle events."""
+        ctx = approvals.get_run(run_id)
+        if ctx is None:
+            self._run_not_found(run_id)
+            return
+        try:
+            self._begin_sse()
+        except (BrokenPipeError, ConnectionError):
+            return
+        while True:
+            try:
+                event = run_coro(_next_run_event(ctx.queue, 30.0))
+            except Exception:
+                logger.debug("events drain error for run %s", run_id, exc_info=True)
+                break
+            try:
+                if event is _KEEPALIVE:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                if event is None:
+                    self.wfile.write(b": stream closed\n\n")
+                    self.wfile.flush()
+                    break
+                self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionError):
+                break
+
+    def _handle_run_approval(self, run_id):
+        """POST /v1/runs/{id}/approval — resolve a pending run approval."""
+        ctx = approvals.get_run(run_id)
+        if ctx is None:
+            self._run_not_found(run_id)
+            return
+        body, err = self._read_json_body()
+        if err:
+            self._send_json(400, {"error": {"message": err, "type": "invalid_request_error"}})
+            return
+        raw = str(body.get("choice", "")).strip().lower()
+        choice = {"approve": "once", "approved": "once", "allow": "once"}.get(raw, raw)
+        if choice not in ("once", "session", "always", "deny"):
+            self._send_json(400, {"error": {
+                "message": "Invalid approval choice; expected one of: once, session, always, deny",
+                "type": "invalid_request_error"}})
+            return
+        resolved = ctx.resolve(choice)
+        if resolved <= 0:
+            self._send_json(409, {"error": {
+                "message": f"Run has no pending approval: {run_id}", "type": "invalid_request_error"}})
+            return
+        self._send_json(200, {
+            "object": "hermes.run.approval_response",
+            "run_id": run_id, "choice": choice, "resolved": resolved})
+
+    def _handle_run_stop(self, run_id):
+        """POST /v1/runs/{id}/stop — interrupt a running agent."""
+        ctx = approvals.get_run(run_id)
+        if ctx is None:
+            self._run_not_found(run_id)
+            return
+        ctx.set_status("stopping")
+        ctx.resolve("deny")  # unblock any pending approval so the run can unwind
+        fut = ctx.task_future
+        if fut is not None:
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+        self._send_json(200, {"run_id": run_id, "status": "stopping"})
 
     # ---- chat completions ----
     def _handle_chat(self):
@@ -563,7 +819,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
 def main():
     global _TRACING_CALLBACKS
     _TRACING_CALLBACKS = init_tracing() or []
-    get_loop()  # start the persistent async loop thread before serving requests
+    loop = get_loop()  # start the persistent async loop thread before serving requests
+    asyncio.run_coroutine_threadsafe(_run_sweeper(), loop)  # GC terminal runs
     logger.info("hermes in-VM gateway (deepagents adapter) starting on 0.0.0.0:%d "
                 "(agent=%s, auth=%s)", GATEWAY_PORT, AGENT_TYPE,
                 "on" if API_SERVER_KEY else "off")

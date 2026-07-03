@@ -108,9 +108,21 @@ context.
 
 ## Endpoints
 
-| Method | Path                   | Auth | Description |
-|--------|------------------------|------|-------------|
-| GET    | `/health`              | no   | `{"status":"ok"}` |
-| GET    | `/v1/capabilities`     | no   | feature flags (both `false`; legacy chat path) |
-| GET    | `/v1/models`           | yes  | agents visible to the token scope |
-| POST   | `/v1/chat/completions` | yes  | stream-proxy to the agent's VM |
+| Method | Path                      | Auth | Description |
+|--------|---------------------------|------|-------------|
+| GET    | `/health`                 | no   | `{"status":"ok"}` |
+| GET    | `/v1/capabilities?model=` | no   | capabilities object; run/approval features follow the agent's `approval` config flag |
+| GET    | `/v1/models`              | yes  | agents visible to the token scope |
+| POST   | `/v1/chat/completions`    | yes  | stream-proxy to the agent's VM |
+| POST   | `/v1/runs`                | yes  | start a run (`202` + `run_id`); holds the agent slot for the run's lifetime |
+| GET    | `/v1/runs/{id}[/events]`  | yes  | run status / SSE lifecycle events (proxied to the run's VM) |
+| POST   | `/v1/runs/{id}/approval`  | yes  | resolve a pending approval (`{"choice":…}`) |
+| POST   | `/v1/runs/{id}/stop`      | yes  | interrupt the run |
+
+The **runs API** (interactive dangerous-command approval) is proxied to the VM
+that owns the run; `runs.go` binds `run_id → VM` from the create response and a
+background supervisor holds the agent's scheduler slot until the run is terminal.
+See [docs/hermes-gateway.md](../docs/hermes-gateway.md#runs-api-interactive-approval).
+
+Also note `/v1/capabilities` no longer hard-codes both flags false: it reads the
+`?model=` agent and reflects that agent's `approval` config flag.

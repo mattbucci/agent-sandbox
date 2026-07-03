@@ -435,6 +435,11 @@ def cmd_compile_gateway():
         # scheduler.default_concurrency; the Go side is authoritative).
         if "concurrency" in spec:
             entry["concurrency"] = int(spec["concurrency"])
+        # Optional per-agent runs-API capability flag: advertises interactive
+        # dangerous-command approval on /v1/capabilities for this agent. Omit
+        # when false to match the Go router's `omitempty` (false is the default).
+        if spec.get("approval"):
+            entry["approval"] = True
         agents[name] = entry
 
     gateway_json = {

@@ -95,10 +95,17 @@ type Token struct {
 // used for black-box backends (e.g. the real hermes-agent) that would otherwise
 // reject or mis-forward the agent id as a model name.
 // Concurrency, when > 0, overrides scheduler.default_concurrency for this agent.
+// Approval advertises the runs API (interactive dangerous-command approval) for
+// this agent on /v1/capabilities: true means the backend implements
+// /v1/runs* (the real hermes container natively; the deepagents harness via its
+// in-VM run lifecycle). The router itself is backend-agnostic — it proxies
+// /v1/runs* regardless; this flag only drives what capabilities advertises so
+// the webui knows whether to use the runs path for the selected model.
 type AgentConfig struct {
 	APIServerKey string `json:"api_server_key"`
 	Model        string `json:"model,omitempty"`
 	Concurrency  int    `json:"concurrency,omitempty"`
+	Approval     bool   `json:"approval,omitempty"`
 }
 
 // LoadConfig reads and parses the gateway.json file at path.
