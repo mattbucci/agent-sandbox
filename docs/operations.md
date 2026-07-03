@@ -155,6 +155,127 @@ bin/sandbox-ctl network-status
 # Shows: TAP devices, nftables rules, Squid status, dnsmasq status
 ```
 
+## Gateway Runbook
+
+Operating the hermes-gateway router's scheduling / task / observability /
+dashboard features (see [Hermes Gateway](hermes-gateway.md) for the contracts
+and [ADR 0003](adr/0003-gateway-scheduling-observability-dashboard.md) for the
+rationale). A manual end-to-end exercise of everything below lives in
+`test/gateway-smoke.sh` (run by hand on the host, never CI).
+
+### Reading /metrics
+
+`GET /metrics` is Prometheus text format, prefix `hermes_gateway_`. From the
+host it needs **no auth** (loopback rule — this is how the otel collector
+scrapes it); from the LAN present any gateway or dashboard bearer.
+
+```bash
+# Everything, from the host
+curl -s http://127.0.0.1:8642/metrics
+
+# Is anything saturated? (queue depth, running slots, rejections)
+curl -s http://127.0.0.1:8642/metrics | grep -E 'sched_(queue_depth|running|rejected)'
+
+# Task health: states, retries, oldest pending age, store persistence
+curl -s http://127.0.0.1:8642/metrics | grep -E '(^| )hermes_gateway_(tasks\{|task_|store_degraded)'
+
+# VM liveness as the router sees it
+curl -s http://127.0.0.1:8642/metrics | grep vm_up
+
+# From a LAN machine (gateway or dashboard bearer required, else 401)
+curl -s -H "Authorization: Bearer $KEY" http://hermes-gateway.ph.ca:8642/metrics
+```
+
+The useful alarms: `sched_rejected_total{reason=queue_full|wait_timeout}`
+climbing (clients are getting 429/503), `task_oldest_pending_age_seconds`
+growing (dispatcher starved or VM down — check `vm_up`), `store_degraded 1`
+(task records failing to persist — check disk/permissions on
+`state/gateway/tasks/`), and `otlp_export_batches_total{outcome="error"}`
+climbing (collector down; see below). The collector also scrapes these every
+30s into `/var/log/otel/metrics.jsonl` (archival/offline grep only — the
+dashboard reads live in-memory state instead).
+
+### Dashboard & token issuance
+
+The ops dashboard is at `http://hermes-gateway.ph.ca:8642/dashboard/`. The page
+itself is an inert shell; every data call needs a bearer from
+`gateway.dashboard.tokens` — a **dedicated ops credential**, deliberately not
+the webui gateway token. With no token configured the APIs fail closed (403).
+
+```bash
+# 1. Generate a token
+echo "hgwd_$(openssl rand -hex 24)"
+
+# 2. Add it to config/sandbox.yaml
+#    gateway:
+#      dashboard:
+#        tokens: ["hgwd_<the value>"]
+
+# 3. Recompile and restart the router
+bin/sandbox-ctl gateway compile
+sudo bin/sandbox-ctl gateway stop && sudo bin/sandbox-ctl gateway start
+```
+
+Open `/dashboard/`, paste the token at the prompt (kept in browser
+localStorage; sent only as an `Authorization` header). Rotate by replacing the
+list entry and recompiling/restarting; revoke the old browser by clearing its
+localStorage. Multiple tokens are allowed, so each operator can have their own.
+
+### Task recovery behavior
+
+Task records persist under `state/gateway/tasks/` (`<id>.json` +
+`<id>.output.txt` spool). On every boot the router replays the recovery matrix
+— a `kill -9`, a crash, and a clean `gateway stop` all land the same outcomes:
+
+| Found at boot | Becomes |
+|---|---|
+| `pending`, deadline passed | `expired` |
+| `running`, cancel was requested | `cancelled` |
+| `running`, deadline passed | `expired` |
+| `running`, spool has bytes, `retry_on_partial:false` | `failed` (interrupted) — partial output usually means side effects already happened |
+| `running`, attempts exhausted | `failed` (interrupted) |
+| `running`, otherwise | re-queued `pending` with backoff |
+| unparseable record | renamed `<name>.corrupt`, skipped (inspect/delete by hand) |
+| record for an agent no longer in config | orphaned: logged, never claimed, expires at its deadline |
+
+Note the interrupted attempt still counts (`attempts` is incremented at claim
+time — a crash burns an attempt). Terminal tasks are garbage-collected after
+`tasks.retention_h` (default 7 days) and capped at `tasks.max_records`.
+
+### Degraded-mode banners
+
+Every external dependency degrades without touching chat routing. Where you see
+it and what it means:
+
+| Signal | Meaning | Fix |
+|---|---|---|
+| dashboard **collector** dot red / "no successful export yet" | no successful OTLP export in >5 min | `systemctl status otel-collector` (see below) |
+| dashboard **traces_file** / **squid_log** dot red; panel shows `available:false` | `/var/log/otel/traces.jsonl` or `/var/log/squid/access.log` missing/unreadable | check the collector/squid and file permissions; `dashboard_source_errors_total` counts these |
+| dashboard **tasks_dir** dot red; task panels `available:false`; `/v1/tasks*` returns 404 | task store failed to open at boot — routing continues without tasks | fix `state/gateway/tasks/` (exists? writable?), restart the gateway |
+| `store_degraded` gauge = 1 / overview `store_degraded:true` | a task record failed its last persist; in-memory state is authoritative and the write retries on the next transition | check disk space/permissions; watch for `store_error` in `state/logs/gateway.log` |
+| `429` / `503` on chat | not degradation — saturation backpressure by design | raise per-agent `concurrency` only if the agent can truly handle parallel turns |
+
+### Collector-down symptoms
+
+When the otel collector is stopped (or `:4318` is unreachable):
+
+- Routing, chat, and tasks are **completely unaffected** — span export is
+  fire-and-forget.
+- `otlp_export_batches_total{outcome="error"}` climbs; batches are dropped, not
+  retried (the collector is the durability layer). If spans are produced faster
+  than the failing exports drain, `otlp_spans_dropped_total` climbs too.
+- `state/logs/gateway.log` shows an `otlp_export_fail` warning at most once per
+  minute.
+- The dashboard's collector dot goes red ("last export Ns ago"); the recent-
+  traces panel goes stale and, once the file rotates away or was never written,
+  reports `available:false`.
+
+Recover with `sudo systemctl restart otel-collector` — the dot goes green on
+the next successful export; nothing in the gateway needs a restart. To run
+permanently without a collector, set `gateway.observability.otlp_endpoint: ""`
+(span export off; `traceparent` is still propagated so in-VM traces stay
+linkable).
+
 ## Troubleshooting
 
 ### VM fails to launch

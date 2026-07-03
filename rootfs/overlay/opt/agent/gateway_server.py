@@ -37,7 +37,45 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # on sys.path[0] because start.sh execs this file by absolute path.
 from agent import create_agent, init_tracing
 
+# Guarded OTel imports: with opentelemetry absent every tracing hook below
+# degrades to a no-op and the wire behaviour is unchanged.
+try:
+    from opentelemetry import context as otel_context
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.propagate import extract as _otel_propagate_extract
+    from opentelemetry.trace import SpanKind as _OtelSpanKind
+    _OTEL_AVAILABLE = True
+except Exception:
+    otel_context = otel_trace = _otel_propagate_extract = _OtelSpanKind = None
+    _OTEL_AVAILABLE = False
+
 logger = logging.getLogger("gateway")
+
+
+def _otel_carrier(headers):
+    """Build a LOWERCASED header carrier for traceparent extraction.
+
+    Load-bearing: the Go router canonicalizes the header as "Traceparent",
+    while the OTel dict getter does an exact-key lookup for "traceparent".
+    Without lowercasing, extraction silently yields no parent and the in-VM
+    spans detach from the gateway trace.
+    """
+    return {k.lower(): v for k, v in headers.items()}
+
+
+def _otel_extract(carrier):
+    """Extract the parent trace context from a (lowercased) carrier.
+
+    Returns an OTel Context, or None when opentelemetry is unavailable or
+    extraction fails.
+    """
+    if not _OTEL_AVAILABLE:
+        return None
+    try:
+        return _otel_propagate_extract(carrier)
+    except Exception:
+        logger.warning("traceparent extraction failed", exc_info=True)
+        return None
 
 # ---------------------------------------------------------------------------
 # Config (read once at startup)
@@ -51,13 +89,73 @@ DEFAULT_SESSION = "default"
 # Per-session conversation history. The webui client does NOT resend prior turns;
 # multi-turn continuity is THIS server's job, keyed by X-Hermes-Session-Id. We
 # store only user/assistant turns (the agent supplies its own system prompt).
+#
+# Bounded: at most MAX_SESSIONS sessions (LRU-evicted by last access) and at
+# most MAX_HISTORY_MESSAGES messages per session (oldest whole user/assistant
+# pairs trimmed first), so long-lived VMs don't grow session memory unbounded.
 # ---------------------------------------------------------------------------
+MAX_SESSIONS = 200
+MAX_HISTORY_MESSAGES = 80
+
 SESSIONS = {}                      # sid -> [ {"role","content"}, ... ]
+SESSIONS_LAST_ACCESS = {}          # sid -> time.monotonic() of last touch (LRU)
 SESSIONS_LOCK = threading.Lock()
+
+
+def _session_history(sid):
+    """Snapshot a session's history and mark it recently used."""
+    with SESSIONS_LOCK:
+        if sid in SESSIONS:
+            SESSIONS_LAST_ACCESS[sid] = time.monotonic()
+        return list(SESSIONS.get(sid, []))
+
+
+def _session_append(sid, history, new_msgs):
+    """Append a completed turn to a session, then trim/evict past the caps.
+
+    Re-reads the live history under the lock (rather than overwriting with the
+    caller's stale snapshot) so a concurrent turn on the same session is not
+    silently lost.
+    """
+    with SESSIONS_LOCK:
+        SESSIONS[sid] = SESSIONS.get(sid, history) + new_msgs
+        SESSIONS_LAST_ACCESS[sid] = time.monotonic()
+        _trim_history_locked(sid)
+        _evict_sessions_locked()
+
+
+def _trim_history_locked(sid):
+    """Cap a session at the most recent MAX_HISTORY_MESSAGES messages.
+
+    Trims oldest first, always whole user/assistant pairs. Caller holds
+    SESSIONS_LOCK.
+    """
+    history = SESSIONS.get(sid) or []
+    if len(history) <= MAX_HISTORY_MESSAGES:
+        return
+    drop = len(history) - MAX_HISTORY_MESSAGES
+    if drop % 2:
+        drop += 1  # never split a user/assistant pair
+    SESSIONS[sid] = history[drop:]
+    logger.info("session %s history trimmed: dropped %d oldest message(s), %d kept",
+                sid, drop, len(SESSIONS[sid]))
+
+
+def _evict_sessions_locked():
+    """LRU-evict sessions beyond MAX_SESSIONS. Caller holds SESSIONS_LOCK."""
+    while len(SESSIONS) > MAX_SESSIONS:
+        victim = min(SESSIONS, key=lambda s: SESSIONS_LAST_ACCESS.get(s, 0.0))
+        SESSIONS.pop(victim, None)
+        SESSIONS_LAST_ACCESS.pop(victim, None)
+        logger.info("session %s evicted (LRU, over cap of %d sessions)",
+                    victim, MAX_SESSIONS)
 
 # Lazily-built, reused DeepAgents agent.
 _AGENT = None
 _AGENT_LOCK = threading.Lock()
+
+# LangChain tracing callbacks from init_tracing(); set once in main().
+_TRACING_CALLBACKS = []
 
 
 def get_agent():
@@ -65,7 +163,7 @@ def get_agent():
     global _AGENT
     with _AGENT_LOCK:
         if _AGENT is None:
-            _AGENT = create_agent()
+            _AGENT = create_agent(callbacks=_TRACING_CALLBACKS)
         return _AGENT
 
 
@@ -109,6 +207,30 @@ def run_coro(coro):
     so the existing per-handler try/except blocks behave exactly as before.
     """
     return asyncio.run_coroutine_threadsafe(coro, get_loop()).result()
+
+
+async def _traced(coro, carrier, attrs):
+    """Await `coro` inside a SERVER "agent.chat" span.
+
+    The span parents on the router's inbound traceparent, extracted from the
+    LOWERCASED header `carrier`. This wrapper runs INSIDE the loop coroutine:
+    contextvars are captured per run_coroutine_threadsafe submission, so the
+    attach()ed parent context and the current span cannot cross-contaminate
+    concurrent sessions sharing the persistent loop. With opentelemetry absent
+    it awaits `coro` untouched.
+    """
+    if not _OTEL_AVAILABLE:
+        return await coro
+    parent_ctx = _otel_extract(carrier)
+    token = otel_context.attach(parent_ctx) if parent_ctx is not None else None
+    try:
+        tracer = otel_trace.get_tracer("hermes.gateway_server")
+        with tracer.start_as_current_span("agent.chat", kind=_OtelSpanKind.SERVER,
+                                          attributes=attrs):
+            return await coro
+    finally:
+        if token is not None:
+            otel_context.detach(token)
 
 
 # ---------------------------------------------------------------------------
@@ -302,12 +424,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         # Snapshot this session's history; build agent input = history + [new user].
         sid = self.headers.get("X-Hermes-Session-Id") or DEFAULT_SESSION
-        with SESSIONS_LOCK:
-            history = list(SESSIONS.get(sid, []))
+        history = _session_history(sid)
         agent_input = {"messages": history + [new_user]}
 
         logger.info("chat session=%s agent=%s stream=%s history_turns=%d",
                     sid, resp_model, stream, len(history))
+
+        # Trace context: lowercased carrier (the Go router sends "Traceparent")
+        # plus the SERVER-span attributes _traced() puts on "agent.chat".
+        carrier = _otel_carrier(self.headers)
+        span_attrs = {
+            "hermes.session_id": sid,
+            "hermes.agent": resp_model,
+            "hermes.stream": stream,
+            "hermes.history_turns": len(history),
+        }
 
         try:
             ag = get_agent()
@@ -329,24 +460,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
 
         if stream:
-            assistant_text = self._do_stream(ag, agent_input, resp_model)
+            assistant_text = self._do_stream(ag, agent_input, resp_model, carrier, span_attrs)
         else:
-            assistant_text = self._do_blocking(ag, agent_input, resp_model)
+            assistant_text = self._do_blocking(ag, agent_input, resp_model, carrier, span_attrs)
 
         if assistant_text is None:
             return  # non-stream error already written
 
-        # Append this turn so the next request on the session continues it. Re-read
-        # the live history under the lock (rather than overwriting with our stale
-        # snapshot) so a concurrent turn on the same session is not silently lost.
-        with SESSIONS_LOCK:
-            SESSIONS[sid] = SESSIONS.get(sid, history) + [new_user, {"role": "assistant", "content": assistant_text}]
+        # Append this turn so the next request on the session continues it.
+        _session_append(sid, history,
+                        [new_user, {"role": "assistant", "content": assistant_text}])
 
-    def _do_blocking(self, ag, agent_input, resp_model):
+    def _do_blocking(self, ag, agent_input, resp_model, carrier, span_attrs):
         created = int(time.time())
         cid = "chatcmpl-" + uuid.uuid4().hex
         try:
-            result = run_coro(ag.ainvoke(agent_input))
+            result = run_coro(_traced(ag.ainvoke(agent_input), carrier, span_attrs))
         except Exception as e:
             logger.exception("agent invoke error")
             self._send_json(500, {"error": {"message": str(e), "type": "internal_error"}})
@@ -369,7 +498,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._send_json(200, resp)
         return content
 
-    def _do_stream(self, ag, agent_input, resp_model):
+    def _do_stream(self, ag, agent_input, resp_model, carrier, span_attrs):
         created = int(time.time())
         cid = "chatcmpl-" + uuid.uuid4().hex
         try:
@@ -380,7 +509,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         acc = []
         try:
-            run_coro(self._astream_agent(ag, agent_input, cid, created, resp_model, acc))
+            run_coro(_traced(
+                self._astream_agent(ag, agent_input, cid, created, resp_model, acc),
+                carrier, span_attrs))
         except (BrokenPipeError, ConnectionError):
             return "".join(acc)  # client went away mid-stream
         except Exception as e:
@@ -428,7 +559,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    init_tracing()
+    global _TRACING_CALLBACKS
+    _TRACING_CALLBACKS = init_tracing() or []
     get_loop()  # start the persistent async loop thread before serving requests
     logger.info("hermes in-VM gateway (deepagents adapter) starting on 0.0.0.0:%d "
                 "(agent=%s, auth=%s)", GATEWAY_PORT, AGENT_TYPE,

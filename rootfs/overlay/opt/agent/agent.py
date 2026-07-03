@@ -30,11 +30,17 @@ logging.basicConfig(
 logger = logging.getLogger("agent")
 
 def init_tracing():
-    """Initialize OpenTelemetry tracing if an endpoint is configured."""
+    """Initialize OpenTelemetry tracing if an endpoint is configured.
+
+    Returns a list of LangChain callback handlers (possibly empty) that the
+    caller passes to create_agent(callbacks=...) so agent/LLM/tool runs are
+    traced. Always returns a list; tracing failures never break the agent.
+    """
+    callbacks = []
     otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not otel_endpoint:
         logger.info("No OTEL_EXPORTER_OTLP_ENDPOINT set, tracing disabled")
-        return
+        return callbacks
 
     try:
         from opentelemetry import trace
@@ -73,6 +79,17 @@ def init_tracing():
         logger.info(f"OTel tracing enabled → {otel_endpoint}")
     except Exception as e:
         logger.warning(f"Failed to initialize OTel tracing: {e}")
+        return callbacks
+
+    # Hand-rolled LangChain callback handler (agent.graph / chat / tool spans);
+    # replaces opentelemetry-instrumentation-langchain — no extra pip package.
+    try:
+        from otel_callbacks import OTelCallbackHandler
+        callbacks.append(OTelCallbackHandler())
+    except Exception as e:
+        logger.warning(f"OTel LangChain callbacks unavailable: {e}")
+
+    return callbacks
 
 
 def load_system_prompt() -> str:
@@ -114,8 +131,13 @@ async def _load_mcp_tools():
         return []
 
 
-def create_agent():
-    """Create and configure the DeepAgents agent."""
+def create_agent(callbacks=None):
+    """Create and configure the DeepAgents agent.
+
+    `callbacks` is the (possibly empty) list returned by init_tracing(); when
+    present it is wired onto every run via .with_config so the whole
+    LangGraph run tree is traced.
+    """
     from deepagents import create_deep_agent
     from deepagents.backends import LocalShellBackend
     from langchain_openai import ChatOpenAI
@@ -175,6 +197,14 @@ def create_agent():
         deep_agent_kwargs["tools"] = mcp_tools
 
     agent = create_deep_agent(**deep_agent_kwargs)
+
+    # Attach tracing callbacks to every run of this agent. Failure here costs
+    # exactly one warning and yields an uninstrumented (but working) agent.
+    if callbacks:
+        try:
+            agent = agent.with_config({"callbacks": list(callbacks)})
+        except Exception as e:
+            logger.warning(f"Failed to attach tracing callbacks: {e}")
 
     return agent
 
@@ -246,8 +276,8 @@ async def run_agent_loop(agent):
 
 def main():
     logger.info("Agent sandbox runtime starting...")
-    init_tracing()
-    agent = create_agent()
+    callbacks = init_tracing()
+    agent = create_agent(callbacks=callbacks)
     asyncio.run(run_agent_loop(agent))
 
 

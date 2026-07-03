@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 )
 
@@ -53,4 +54,38 @@ func findVMForAgent(stateDir, agent string) (VMInfo, bool) {
 		return info, true
 	}
 	return VMInfo{}, false
+}
+
+// ListVMs scans <stateDir>/vms/*/info.json and returns every live VM (has an
+// IP and an alive firecracker process), sorted by agent type then instance id.
+// Used by the dashboard for liveness and squid ip->agent mapping. Unreadable
+// or malformed entries are skipped; a missing state dir yields an empty list.
+func ListVMs(stateDir string) []VMInfo {
+	pattern := filepath.Join(stateDir, "vms", "*", "info.json")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	var vms []VMInfo
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var info VMInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		if info.VMIP == "" || !pidAlive(info.FirecrackerPID) {
+			continue
+		}
+		vms = append(vms, info)
+	}
+	sort.Slice(vms, func(i, j int) bool {
+		if vms[i].AgentType != vms[j].AgentType {
+			return vms[i].AgentType < vms[j].AgentType
+		}
+		return vms[i].InstanceID < vms[j].InstanceID
+	})
+	return vms
 }

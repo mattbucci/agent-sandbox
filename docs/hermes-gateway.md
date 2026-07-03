@@ -197,6 +197,14 @@ The router exposes exactly the legacy default `/v1/chat/completions` path that
 `hermes-webui` expects (runs-API off; richer tool/approval events are not
 implemented).
 
+**These four paths are unchanged and byte-compatible** — same bodies, SSE
+framing, 401/403/502 envelopes, and `X-Hermes-Session-Id`/`-Key` passthrough —
+across the scheduling/tasks/observability upgrade. The only additions on the
+chat path are **saturation-only**: a request may wait in the agent's queue, and
+a saturated agent returns `429` (queue full) or `503` (wait timeout), both with
+`Retry-After` (see [Scheduling & backpressure](#scheduling--backpressure)). The
+router also sends a `traceparent` header downstream, which both backends ignore.
+
 | Method | Path                   | Auth | Returns |
 |--------|------------------------|------|---------|
 | GET    | `/health`              | no   | `{"status":"ok"}` |
@@ -250,6 +258,166 @@ the literal `data: [DONE]`.
 {"error":{"message":"Invalid API key","type":"invalid_request_error"}}
 ```
 
+## Scheduling & backpressure
+
+The router runs shared **admission control** per agent (an in-VM agent is
+effectively single-threaded — one shell, one working tree — so concurrent turns
+would interleave side effects). Sync chat and async tasks draw from the same
+per-agent slot pool ([ADR 0003](adr/0003-gateway-scheduling-observability-dashboard.md)):
+
+- **Concurrency limit** — `scheduler.default_concurrency` (default `1`)
+  simultaneous runs per agent, sync + async combined; a per-agent
+  `concurrency` override in `gateway.agents.<name>` wins. The slot is held for
+  the **whole stream** — that is what concurrency=1 means.
+- **Sync queue** — when the agent is at its limit, an interactive chat waits in
+  a bounded FIFO: up to `sync_queue_max` (default `4`) waiters, for at most
+  `sync_queue_wait_s` (default `120`) seconds.
+- **Async aging** — task-dispatch slot requests queue unbounded and never time
+  out, but jump ahead of the sync FIFO once they have waited
+  `async_starvation_after_s` (default `300`) seconds, so background tasks are
+  not starved forever by interactive traffic.
+- **No preemption** — running work is never interrupted to make room (shell
+  side effects cannot be safely suspended).
+
+The two saturation responses are **additive** to the chat contract (nothing else
+changed); both carry `Retry-After: <scheduler.retry_after_s>` (default `15`):
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| sync queue full | `429` | `{"error":{"message":"Agent <a> is busy and its queue is full","type":"rate_limit_error"}}` |
+| queued longer than `sync_queue_wait_s` | `503` | `{"error":{"message":"Timed out waiting for agent <a>","type":"server_error"}}` |
+
+Admission happens **before** VM resolve, so a VM restarted while the request was
+queued is picked up. A request whose client disconnects while queued abandons
+its place; no slot leaks.
+
+## Task API
+
+The task subsystem (`tasks.enabled`, default on) runs agent work
+**asynchronously**: submit a prompt, poll the record, fetch the growing output —
+no client connection has to stay open. Tasks are durable JSON records under
+`state/gateway/tasks/` (atomic-rename persistence, output spool sidecars, boot
+recovery, GC after `retention_h`). One dispatcher goroutine per agent claims the
+highest-priority runnable task (priority desc, then created_at asc) whenever the
+scheduler grants it a slot.
+
+Auth is the **existing gateway bearer**; the token's scope must allow the
+task's agent. When `tasks.enabled: false`, every `/v1/tasks*` path is simply not
+registered and returns `404` like any unknown path.
+
+| Method + path | Request | Response |
+|---|---|---|
+| `POST /v1/tasks` | `{"agent":"feature-dev", "input":"..."` **XOR** `"request":{"messages":[...]}, "priority":0, "timeout_s":3600, "deadline_s":86400, "not_before":"RFC3339", "max_attempts":2, "retry_on_partial":false, "session_id":"task:custom"}` — `agent` may alias as `model`; `request.model` is ignored; body ≤ 1 MiB (413); priority clamped to [-100,100]; `1≤timeout_s≤86400`, `60≤deadline_s≤604800`, `1≤max_attempts≤5` | `201` full task object; `400` validation; `403` scope; `429`+`Retry-After` when the agent already has ≥ `max_pending_per_agent` non-terminal tasks; `500` if the initial persist fails |
+| `GET /v1/tasks?agent=&state=&limit=50&after=<id>` | `state` repeatable, or `active` (= pending+running); scope-filtered | `{"object":"list","data":[{"id","object":"task.summary","agent","state","priority","created_at","updated_at","attempts","cancel_requested","age_s","deadline","error"}],"has_more":false}` sorted created_at desc, keyset cursor |
+| `GET /v1/tasks/{id}` | — | full record; `404` envelope `{"error":{"message":"No such task","type":"invalid_request_error"}}` |
+| `GET /v1/tasks/{id}/output` | — | `text/plain; charset=utf-8` — the whole output-spool snapshot (poll it to watch a run grow) |
+| `POST /v1/tasks/{id}/cancel` | — | `200` updated object; idempotent — a terminal task returns unchanged with `"already_terminal":true` |
+| `DELETE /v1/tasks/{id}` | — | `200` on a terminal task; `409` otherwise |
+
+**Lifecycle.** `pending → running → succeeded | failed | cancelled | expired`
+(and `running → pending` on a retry re-queue). Per attempt: context deadline of
+`min(timeout_s, deadline)`; an **idle watchdog** fails the attempt if no bytes
+arrive from the VM for `idle_timeout_s`. Retries back off
+`min(retry_backoff_base_s·2ⁿ⁻¹, retry_backoff_cap_s)`. VM-unavailable (no VM,
+connect refused, non-2xx before the first byte) **refunds** the attempt and
+retries after `vm_unavailable_retry_s`, bounded by the deadline. An attempt that
+already produced output is only retried when `retry_on_partial` is set (default
+`false` — partial output usually means side effects already happened).
+
+**Record shape** (wire == disk; the disk copy adds `"schema":1`): id
+`t-<UTC ts>-<8 hex>`; `session_id` defaults to `task:<id>` (each task gets its
+own in-VM history — note the in-VM server never evicts sessions, so unique
+session ids grow VM memory by roughly one history per task; acceptable at
+homelab volume); `result` (succeeded only) inlines `content` up to 64 KiB
+(`content_truncated`, `output_bytes`, `finish_reason`, `usage`), with full text
+always at `/output`; `attempt_history` (capped 20) records per-attempt
+`started_at/ended_at/vm_ip/outcome/error/output_bytes`; `submit_trace` and
+`trace_ids` join the task to its traces.
+
+**Recovery on boot** (same matrix as SIGTERM — `kill -9` and a clean stop yield
+the same task outcomes): `.tmp` purged; unparseable records renamed
+`*.corrupt`; pending past deadline ⇒ `expired`; `running` ⇒ cancel-requested ⇒
+`cancelled`, past deadline ⇒ `expired`, partial output without
+`retry_on_partial` ⇒ `failed (interrupted)`, attempts exhausted ⇒
+`failed (interrupted)`, otherwise re-queued `pending` with backoff. Claim-time
+`attempts++` was already counted — **a crash burns an attempt** (ADR 0003).
+Tasks referencing an agent no longer in config are orphaned: counted, logged,
+never claimed, expired at their deadline.
+
+## Observability
+
+All observability degrades without touching routing: collector down ⇒ spans
+drop (counted); files unreadable ⇒ dashboard panels report `available:false`.
+
+**Traces (OTLP).** The router exports hand-encoded OTLP/HTTP JSON spans to
+`observability.otlp_endpoint` (default `http://127.0.0.1:4318`, the local otel
+collector; `""` disables export while **still generating and propagating
+`traceparent`**, so in-VM traces stay linkable). `sample_ratio` (default `1.0`)
+is a deterministic trace-id sampler. A sync chat is **one trace end-to-end**:
+
+```
+SERVER "POST /v1/chat/completions"        (root, or child of a valid inbound traceparent;
+  │                                        inbound sampled=0 is overridden — ADR 0003)
+  ├─ INTERNAL "sched.wait"                (only when the queue wait exceeded 5ms)
+  └─ CLIENT "proxy /v1/chat/completions"  (its context rides the traceparent header into the VM)
+       └─ SERVER "agent.chat"             (in-VM gateway_server.py)
+            └─ agent.graph / tool <name> / chat <model>  (in-VM callback spans)
+```
+
+Task attempts are **new roots** (`INTERNAL "task.attempt"`, attrs
+`hermes.task_id/_attempt/_priority`, `hermes.agent`, `hermes.outcome`,
+`hermes.queue_wait_ms`) with a **span link** to the persisted submit-request
+context; each attempt's trace id is appended to the task's `trace_ids`. Export:
+one goroutine, cap-1024 queue (non-blocking; drops counted), 512-span/5s
+batches, 3s POST timeout, drop-on-failure (the collector is the durability
+layer), warnings rate-limited to 1/min.
+
+**Metrics (Prometheus).** `GET /metrics`, text format 0.0.4, prefix
+`hermes_gateway_`. Unauthenticated **only from loopback** (the collector scrapes
+`127.0.0.1:8642/metrics` secret-free — see `otel/otel-collector.yaml`); any
+other caller must present a gateway or dashboard bearer, else `401`.
+
+| Kind | Series |
+|------|--------|
+| counters | `http_requests_total{path,method,code}` · `auth_failures_total` · `upstream_errors_total{agent,reason=no_vm\|connect\|status_5xx}` · `stream_bytes_total{agent}` · `sched_admitted_total{agent,class=sync\|task}` · `sched_rejected_total{agent,reason=queue_full\|wait_timeout\|client_gone}` · `task_transitions_total{agent,to_state}` · `task_retries_total{agent}` · `otlp_export_batches_total{outcome=ok\|error}` · `otlp_spans_exported_total` · `otlp_spans_dropped_total` · `dashboard_source_errors_total{source=traces\|squid}` |
+| gauges | `build_info{version}` · `http_inflight_requests{path}` · `sched_queue_depth{agent,class}` · `sched_running{agent}` · `tasks{agent,state}` · `task_oldest_pending_age_seconds{agent}` · `vm_up{agent}` · `store_degraded` — scheduler/task/VM gauges are computed at scrape time from live snapshots, so they cannot drift |
+| histograms | `http_request_duration_seconds{path}` · `proxy_ttfb_seconds{agent}` · `sched_wait_seconds{agent}` · `task_duration_seconds{agent,outcome}` |
+
+**Logs.** `log/slog` structured logging (JSON by default,
+`observability.log_format: text` for plain) on stdout — `sandbox-ctl gateway
+start` redirects it to `state/logs/gateway.log`. Canonical events:
+`http_request`, `sched_reject`, `task_submit/start/finish/retry/cancel`,
+`vm_resolve_fail`, `store_error`, `startup`, `shutdown`, `fatal`. In-request
+events carry `trace_id`/`span_id` for joining with traces; token **names** only
+— never secrets or message content.
+
+## Dashboard
+
+An embedded single-page ops dashboard (dark, zero CDN/fonts/build step — all
+assets compiled into the binary) at **`/dashboard/`** (`/dashboard` redirects
+`302`). Panels: status strip (gateway + dependency dots), per-agent cards (VM
+liveness, running/waiting with run ids and trace ids, admission counters),
+traffic charts (1h of in-memory 10s rings — fresh even when the collector is
+down, see ADR 0003), tasks table with detail drawer/output/cancel, recent trace
+summaries (tail of the collector's `traces.jsonl`), and an egress panel (tail of
+the squid access log) with a dedicated denied list.
+
+**Auth.** The shell and static assets are an unauthenticated inert page. Every
+`/dashboard/api/*` call requires `Authorization: Bearer` from the dedicated
+`dashboard.tokens` list (constant-time compare; the UI prompts once and keeps it
+in localStorage — no cookies). An empty token list **fails closed**: `403
+"dashboard token not configured"`. `dashboard.enabled: false` unregisters
+everything (plain `404`). Data-source problems are `200` + `available:false`,
+never 5xx; auth failures are `401`/`403`.
+
+| Endpoint (poll cadence) | Returns |
+|---|---|
+| `GET /dashboard/api/overview` (2s) | gateway info (`started_at`, `uptime_s`, `pid`, `version`), dependency dots (`collector` via last successful OTLP export, `traces_file`, `squid_log`, `tasks_dir`), per-agent `{vm, limit, queue_cap, running[], waiting[], counters, last_error}`, `tasks_by_state` (+`orphaned`), `store_degraded`, last-minute totals (`reqs_1m`, `errors_1m`, `p95_ms_1m`) |
+| `GET /dashboard/api/timeseries?window_s=3600` (10s) | `{"start_unix","step_s":10,"buckets",series:{"_total":{count,errors,lat_ms_avg,lat_ms_p95},"<agent>":…},"gauges":{queue_depth,running}}` — fixed-length zero-filled arrays, oldest first |
+| `GET /dashboard/api/tasks?state=&agent=&limit=100&after=` (5s) | task summaries across **all** agents (the dashboard token is ops-privileged); `tasks/{id}` adds `request_preview` (first 2 KiB of the last user message); `tasks/{id}/output` returns the spool; `POST tasks/{id}/cancel` mirrors `/v1/tasks/{id}/cancel` |
+| `GET /dashboard/api/traces?limit=50&window_s=900` (10s) | `{"available","file","parsed_lines","skipped_lines","traces":[{"trace_id","root_service","root_name","start","duration_ms","span_count","services","error"}]}` from the tail of `observability.traces_file` (rotation-aware, malformed lines counted) |
+| `GET /dashboard/api/egress?window_s=900` (15s) | `{"available","window_s","log","lines","skipped_lines","totals":{requests,denied,bytes},"by_agent","top_hosts","denied":[…]}` from the tail of `observability.squid_access_log`; client IPs are mapped to agents via live VM state |
+
 ## Configuration
 
 ### `config/sandbox.yaml`
@@ -269,12 +437,50 @@ gateway:
   port: 8642
   default_agent: "feature-dev"
   vm_gateway_port: 8642      # in-VM OpenAI server port (inside each VM)
+
+  # Scheduling, async tasks, observability, dashboard. EVERY key below is
+  # optional: defaults live ONLY in the Go router (applyDefaults()), and
+  # compile-gateway copies these blocks into gateway.json verbatim when
+  # present — omit a block entirely and the router behaves the same. The
+  # values shown are the built-in defaults.
+  scheduler:
+    default_concurrency: 1          # per-agent simultaneous runs, sync+async combined
+    sync_queue_max: 4               # waiting sync requests per agent before 429
+    sync_queue_wait_s: 120          # max sync queue wait before 503
+    async_starvation_after_s: 300   # aging: async slot request jumps sync FIFO after this
+    retry_after_s: 15               # Retry-After on 429/503
+  tasks:
+    enabled: true
+    dir: ""                         # "" -> <state_dir>/gateway/tasks
+    default_timeout_s: 3600         # per attempt
+    default_deadline_s: 86400
+    default_max_attempts: 2
+    retry_on_partial: false
+    retry_backoff_base_s: 10        # backoff(n)=min(base*2^(n-1), cap)
+    retry_backoff_cap_s: 600
+    idle_timeout_s: 900             # no SSE bytes this long -> attempt fails
+    vm_unavailable_retry_s: 30
+    retention_h: 168
+    max_records: 2000
+    max_pending_per_agent: 200
+  observability:
+    otlp_endpoint: "http://127.0.0.1:4318"   # "" disables span export (traceparent still propagated)
+    sample_ratio: 1.0
+    log_format: "json"              # json|text
+    traces_file: "/var/log/otel/traces.jsonl"
+    squid_access_log: "/var/log/squid/access.log"
+  dashboard:
+    enabled: true
+    tokens: []                      # dedicated ops bearers, e.g. ["hgwd_<48hex>"];
+                                    # empty => /dashboard/api/* fail closed (403)
+
   tokens:
     - name: "hermes-webui"
       token: "hgw_YOUR_GATEWAY_KEY"
       agents: ["*"]
   agents:                    # exposed agent types + downstream per-VM key (may be "")
-    feature-dev: { api_server_key: "" }
+    # optional per-agent `concurrency` overrides scheduler.default_concurrency
+    feature-dev: { api_server_key: "", concurrency: 1 }
     debugger:    { api_server_key: "" }
     devops:      { api_server_key: "" }
     researcher:  { api_server_key: "" }
@@ -298,6 +504,11 @@ gateway:
 The router resolves its config path from `-config <path>`, then the
 `GATEWAY_CONFIG` env var, then the default
 `/home/letsrtfm/AI/agent-sandbox/state/gateway/gateway.json`.
+
+A **legacy 7-key `gateway.json`** (as shown above, without the new blocks)
+loads unchanged: defaults for `scheduler`/`tasks`/`observability`/`dashboard`
+are applied only inside the Go router, never by the Python compiler, so a
+stale or hand-edited config behaves identically to a freshly compiled one.
 
 ### Per-agent `/etc/agent.conf`
 
@@ -536,6 +747,11 @@ to use a remote embedder instead of local `fastembed`.
 
 - [`gateway/README.md`](../gateway/README.md) — the Go router internals (config
   schema, auth model, routing, endpoint table).
+- [ADR 0003](adr/0003-gateway-scheduling-observability-dashboard.md) — why
+  scheduling, tasks, observability and the ops dashboard live in this gateway,
+  and the judgment calls behind them.
 - [Architecture](architecture.md) — host components, config pipeline, network
   model.
-- [Operations](operations.md) — launching, observing, and troubleshooting VMs.
+- [Operations](operations.md) — launching, observing, and troubleshooting VMs;
+  includes the gateway ops runbook (metrics, dashboard tokens, task recovery,
+  degraded modes).

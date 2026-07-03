@@ -2,6 +2,7 @@
 # OpenTelemetry Collector configuration for Agent Sandbox
 #
 # Receives traces from agent VMs via OTLP/HTTP on port 4318
+# Scrapes gateway metrics from 127.0.0.1:8642/metrics
 # Exports to local file + optionally to a remote backend
 # =============================================================================
 
@@ -12,6 +13,27 @@ receivers:
         endpoint: "0.0.0.0:4318"
       grpc:
         endpoint: "0.0.0.0:4317"
+
+  # Scrape the gateway's Prometheus endpoint. No auth needed: the gateway
+  # allows unauthenticated /metrics from loopback addresses.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: hermes-gateway
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["127.0.0.1:8642"]
+
+  # Uncomment to also collect host CPU/memory/disk/network metrics.
+  # hostmetrics:
+  #   collection_interval: 60s
+  #   scrapers:
+  #     cpu:
+  #     memory:
+  #     disk:
+  #     network:
+  #     filesystem:
 
 processors:
   batch:
@@ -34,6 +56,14 @@ exporters:
       max_days: 7
       max_backups: 3
 
+  # Archive metrics to file (offline grep; the dashboard reads live gateway state)
+  file/metrics:
+    path: /var/log/otel/metrics.jsonl
+    rotation:
+      max_megabytes: 50
+      max_days: 7
+      max_backups: 3
+
   # Console output (useful for initial debugging, disable in production)
   debug:
     verbosity: basic
@@ -50,3 +80,8 @@ service:
       receivers: [otlp]
       processors: [resource, batch]
       exporters: [file/traces, debug]
+
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [resource, batch]
+      exporters: [file/metrics]

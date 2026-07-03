@@ -248,6 +248,12 @@ chmod 755 "${STAGING}/opt/tools/explore-tools"
 ln -sf /opt/tools/explore-tools "${STAGING}/usr/local/bin/explore-tools"
 
 # Install Python dependencies via uv
+#
+# NOTE (observability, ADR 0003): LangChain span instrumentation is the
+# hand-rolled /opt/agent/otel_callbacks.py (shipped by the overlay cp -a
+# above) — deliberately NOT the opentelemetry-instrumentation-langchain pip
+# package, so this dependency list is unchanged and no new packages are baked
+# into the image.
 chroot "${STAGING}" bash -c '
 cd /opt/agent
 uv venv --python python3.12 .venv

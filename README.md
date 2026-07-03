@@ -116,6 +116,29 @@ A real pinned `NousResearch/hermes-agent:v2026.6.19` backend is also available �
 pre-baked Docker image in its own VM, selected from the webui as model `hermes`. See
 [Real hermes-agent backend](docs/hermes-gateway.md#real-hermes-agent-backend-v2026619).
 
+The router also schedules, runs async tasks, and observes itself
+([ADR 0003](docs/adr/0003-gateway-scheduling-observability-dashboard.md)) — all
+std-lib Go, all config optional, and the four legacy endpoints stay
+byte-compatible (429/503 backpressure is additive, saturation-only):
+
+- **Scheduling & backpressure** — per-agent concurrency (default 1, sync+async
+  combined), bounded sync queue (`429` + `Retry-After` when full, `503` on wait
+  timeout), async aging so tasks never starve. See
+  [Scheduling & backpressure](docs/hermes-gateway.md#scheduling--backpressure).
+- **Async task API** — `POST /v1/tasks` runs agent work without holding a
+  connection: durable records under `state/gateway/tasks/`, priorities,
+  retries with backoff, deadlines, idle watchdog, cancel, output spool, and
+  crash-safe boot recovery. See [Task API](docs/hermes-gateway.md#task-api).
+- **Observability** — OTLP spans end-to-end (gateway → VM → agent callbacks),
+  Prometheus `/metrics` (`hermes_gateway_*`, loopback-unauth so the otel
+  collector scrapes it secret-free), structured JSON logs. See
+  [Observability](docs/hermes-gateway.md#observability).
+- **Ops dashboard** — embedded single page at `/dashboard/` (agents, queues,
+  tasks, traces, squid egress incl. denials), gated by dedicated
+  `dashboard.tokens` bearers, zero external assets. See
+  [Dashboard](docs/hermes-gateway.md#dashboard) and the
+  [Gateway Runbook](docs/operations.md#gateway-runbook).
+
 Durable agent memory is part of the hosted agent surface: a shared
 [mnemosyne](https://pypi.org/project/mnemosyne-memory/) MCP service (`:8077`,
 `sandbox-ctl mnemosyne start`) backs every agent — see
@@ -164,8 +187,8 @@ Testing:    integration-test.sh, security-test.sh, supply-chain-test.sh,
 |-----|----------|
 | [Creating Agents](docs/creating-agents.md) | How to define custom agents with YAML + presets |
 | [Architecture](docs/architecture.md) | System design, config pipeline, network model |
-| [Operations](docs/operations.md) | Running, monitoring, troubleshooting, base tools |
-| [Hermes Gateway](docs/hermes-gateway.md) | OpenAI-compatible router fronting agent VMs for hermes-webui |
+| [Operations](docs/operations.md) | Running, monitoring, troubleshooting, base tools, gateway runbook |
+| [Hermes Gateway](docs/hermes-gateway.md) | OpenAI-compatible router fronting agent VMs: routing, scheduling, task API, observability, dashboard |
 | [Security](docs/security.md) | Threat model, defense layers, accepted risks |
 | [Presets Reference](docs/presets-reference.md) | All egress, capability, and prompt presets |
 

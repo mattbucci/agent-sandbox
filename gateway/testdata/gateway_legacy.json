@@ -1,0 +1,37 @@
+{
+  "bind": "0.0.0.0",
+  "port": 8642,
+  "default_agent": "feature-dev",
+  "state_dir": "/home/placeholder/AI/agent-sandbox/state",
+  "vm_gateway_port": 8642,
+  "tokens": [
+    {
+      "name": "hermes-webui",
+      "token": "hgw-PLACEHOLDER-TEST-TOKEN-000000000000000000000000",
+      "agents": [
+        "*"
+      ]
+    }
+  ],
+  "agents": {
+    "feature-dev": {
+      "api_server_key": ""
+    },
+    "debugger": {
+      "api_server_key": ""
+    },
+    "devops": {
+      "api_server_key": ""
+    },
+    "researcher": {
+      "api_server_key": ""
+    },
+    "security": {
+      "api_server_key": ""
+    },
+    "hermes": {
+      "api_server_key": "hga-PLACEHOLDER-TEST-TOKEN-000000000000000000000000",
+      "model": "gemma"
+    }
+  }
+}

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>hermes-gateway</title>
+<link rel="stylesheet" href="/dashboard/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>hermes-gateway</h1>
+  <div class="topbar-meta">
+    <span id="gw-version" class="muted"></span>
+    <span id="collector-dot" class="dep-dot">collector</span>
+    <span id="gw-uptime" class="muted tnum"></span>
+    <button id="token-change" class="ghost-btn" type="button">token</button>
+  </div>
+</header>
+
+<div id="token-overlay" class="overlay hidden">
+  <form id="token-form" class="token-card">
+    <h2>Dashboard token</h2>
+    <p id="token-msg" class="muted">Enter the ops bearer token for this gateway.</p>
+    <input id="token-input" type="password" autocomplete="off" placeholder="hgwd_&hellip;">
+    <button type="submit">Save</button>
+  </form>
+</div>
+
+<main>
+  <section id="deps-banner" class="banner hidden"></section>
+
+  <section class="tile-row" id="stat-strip"></section>
+
+  <section class="panel">
+    <h2>Agents</h2>
+    <div id="agent-cards" class="cards"></div>
+  </section>
+
+  <section class="chart-grid">
+    <figure class="panel chart-card">
+      <figcaption><span>Requests <span class="muted">per 10s</span></span>
+        <button class="table-toggle" type="button" data-chart="requests">table</button></figcaption>
+      <div id="chart-requests" class="chart"></div>
+    </figure>
+    <figure class="panel chart-card">
+      <figcaption><span>Errors <span class="muted">per 10s</span></span>
+        <button class="table-toggle" type="button" data-chart="errors">table</button></figcaption>
+      <div id="chart-errors" class="chart"></div>
+    </figure>
+    <figure class="panel chart-card">
+      <figcaption><span>Latency <span class="muted">ms, all agents</span></span>
+        <button class="table-toggle" type="button" data-chart="latency">table</button></figcaption>
+      <div id="chart-latency" class="chart"></div>
+    </figure>
+  </section>
+
+  <section class="panel">
+    <h2>Queue &amp; running</h2>
+    <div id="queue-table"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Tasks</h2>
+    <div class="filter-row">
+      <select id="task-state-filter" aria-label="Filter tasks by state">
+        <option value="">all states</option>
+        <option value="active">active</option>
+        <option value="pending">pending</option>
+        <option value="running">running</option>
+        <option value="succeeded">succeeded</option>
+        <option value="failed">failed</option>
+        <option value="cancelled">cancelled</option>
+        <option value="expired">expired</option>
+      </select>
+    </div>
+    <div id="tasks-table"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Recent traces</h2>
+    <div id="traces-panel"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Egress</h2>
+    <div id="egress-panel"></div>
+    <h3>Denied</h3>
+    <div id="egress-denied"></div>
+  </section>
+</main>
+
+<aside id="task-drawer" class="drawer hidden"></aside>
+<div id="tooltip" class="viz-tooltip hidden"></div>
+
+<script src="/dashboard/static/charts.js"></script>
+<script src="/dashboard/static/app.js"></script>
+</body>
+</html>

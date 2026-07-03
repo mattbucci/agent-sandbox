@@ -420,7 +420,8 @@ def cmd_compile_gateway():
             "agents": t.get("agents", []),
         })
 
-    # Normalize agents -> {"<type>": {"api_server_key": "<key>"[, "model": "<m>"]}}
+    # Normalize agents -> {"<type>": {"api_server_key": "<key>"[, "model": "<m>"]
+    #                                 [, "concurrency": <n>]}}
     agents = {}
     for name, spec in (gateway.get("agents", {}) or {}).items():
         spec = spec or {}
@@ -430,6 +431,10 @@ def cmd_compile_gateway():
         model = spec.get("model")
         if model:
             entry["model"] = model
+        # Optional per-agent concurrency override (0/absent -> the router's
+        # scheduler.default_concurrency; the Go side is authoritative).
+        if "concurrency" in spec:
+            entry["concurrency"] = int(spec["concurrency"])
         agents[name] = entry
 
     gateway_json = {
@@ -441,6 +446,14 @@ def cmd_compile_gateway():
         "tokens": tokens,
         "agents": agents,
     }
+
+    # Scheduler / tasks / observability / dashboard blocks pass through
+    # VERBATIM when present. No Python-side defaulting — the Go router's
+    # applyDefaults() is authoritative, so a hand-edited or stale gateway.json
+    # (missing these blocks entirely) behaves identically to one compiled here.
+    for key in ("scheduler", "tasks", "observability", "dashboard"):
+        if key in gateway:
+            gateway_json[key] = gateway[key]
 
     out_path = out_dir / "gateway.json"
     with open(out_path, "w") as f:

@@ -34,13 +34,52 @@ gateway:
   port: 8642
   default_agent: "feature-dev"
   vm_gateway_port: 8642    # in-VM OpenAI server port (inside each VM)
+
+  # Scheduling, async tasks, observability and the ops dashboard. Every key
+  # below is OPTIONAL: defaults live only in the Go router (applyDefaults()),
+  # and compile-gateway copies these blocks into gateway.json verbatim when
+  # present — omit a block entirely and the router behaves the same.
+  scheduler:
+    default_concurrency: 1          # per-agent simultaneous runs, sync+async combined
+    sync_queue_max: 4               # waiting sync requests per agent before 429
+    sync_queue_wait_s: 120          # max sync queue wait before 503
+    async_starvation_after_s: 300   # aging: async slot request jumps sync FIFO after this
+    retry_after_s: 15               # Retry-After on 429/503
+  tasks:
+    enabled: true
+    dir: ""                         # "" -> <state_dir>/gateway/tasks
+    default_timeout_s: 3600         # per attempt
+    default_deadline_s: 86400
+    default_max_attempts: 2
+    retry_on_partial: false
+    retry_backoff_base_s: 10        # backoff(n)=min(base*2^(n-1), cap)
+    retry_backoff_cap_s: 600
+    idle_timeout_s: 900             # no SSE bytes this long -> attempt fails
+    vm_unavailable_retry_s: 30
+    retention_h: 168
+    max_records: 2000
+    max_pending_per_agent: 200
+  observability:
+    otlp_endpoint: "http://127.0.0.1:4318"   # "" disables span export (traceparent still propagated)
+    sample_ratio: 1.0
+    log_format: "json"              # json|text
+    traces_file: "/var/log/otel/traces.jsonl"
+    squid_access_log: "/var/log/squid/access.log"
+  dashboard:
+    enabled: true
+    # Dedicated ops bearers for /dashboard/api/* (generate with:
+    # echo "hgwd_$(openssl rand -hex 24)"). Empty list => APIs 403 fail-closed.
+    tokens: ["hgwd_your-dashboard-token-here"]
+
   tokens:
     # North-gate bearer the router requires from incoming webui requests.
     - name: "hermes-webui"
       token: "hgw_your-gateway-token-here"
       agents: ["*"]
   agents:                  # exposed agent types + downstream per-VM key (may be "")
-    feature-dev: { api_server_key: "" }
+    # Optional per-agent `concurrency` overrides scheduler.default_concurrency
+    # (0/absent = default).
+    feature-dev: { api_server_key: "", concurrency: 1 }
     debugger:    { api_server_key: "" }
     devops:      { api_server_key: "" }
     researcher:  { api_server_key: "" }
