@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 source "${SANDBOX_ROOT}/lib/common.sh"
+source "${SANDBOX_ROOT}/lib/network.sh"   # apply_base_nftables
 ensure_global_compiled
 
 HOST_IFACE="${HOST_IFACE:-enp12s0}"
@@ -75,44 +76,7 @@ ensure_cmd jq    jq        # used host-side by sandbox-ctl + the boot service
 # --- 3. nftables base rules ---
 echo "[3/5] Configuring nftables..."
 
-# Flush any existing vm_filter table
-nft delete table ip vm_filter 2>/dev/null || true
-
-nft -f - <<'NFT'
-table ip vm_filter {
-    chain input {
-        type filter hook input priority 0; policy accept;
-
-        # VMs may reach ONLY Squid/DNS/OTel on the host gateway; everything else
-        # (host SSH, and any other local service the host happens to run) is
-        # dropped — no pivot from inside the sandbox to the host.
-        iifname "tap-vm*" ct state established,related accept
-        iifname "tap-vm*" udp dport 53 accept comment "vm-dns"
-        iifname "tap-vm*" tcp dport { 3128, 3129 } accept comment "vm-squid"
-        iifname "tap-vm*" tcp dport { 4317, 4318 } accept comment "vm-otel"
-        iifname "tap-vm*" drop comment "vm-drop-host"
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy drop;
-
-        # Allow established/related connections back to VMs
-        ct state established,related accept
-    }
-
-    chain prerouting {
-        type nat hook prerouting priority -100;
-        # Per-VM DNAT rules added dynamically by vm/launch.sh
-    }
-
-    chain postrouting {
-        type nat hook postrouting priority 100;
-    }
-}
-NFT
-
-# Add NAT masquerade for outbound traffic from Squid
-nft add rule ip vm_filter postrouting oifname "${HOST_IFACE}" masquerade
+apply_base_nftables "${HOST_IFACE}"
 
 echo "  nftables base rules applied."
 echo "  Default policy: DROP all VM forward traffic."

@@ -69,8 +69,13 @@ release_slot() {
 }
 
 # --- Agent type validation ---
+# One agent type per config/agents/<type>.yaml (other files are ignored).
 list_agent_types() {
-    ls "${SANDBOX_ROOT}/config/agents/" 2>/dev/null | sed 's/.yaml$//' | sort
+    local f
+    for f in "${SANDBOX_ROOT}"/config/agents/*.yaml; do
+        [[ -f "${f}" ]] || continue
+        basename "${f}" .yaml
+    done | sort
 }
 
 validate_agent_type() {
@@ -89,8 +94,12 @@ ensure_compiled() {
     local build_dir="${SANDBOX_ROOT}/build/${agent_type}"
     local agent_yaml="${SANDBOX_ROOT}/config/agents/${agent_type}.yaml"
 
-    # Recompile if build dir missing or YAML is newer
-    if [[ ! -d "${build_dir}" ]] || [[ "${agent_yaml}" -nt "${build_dir}/agent.conf" ]]; then
+    # Recompile if the build dir is missing, or the agent YAML / pinned versions
+    # (inlined into customize.sh) are newer than the compiled output.
+    if [[ ! -d "${build_dir}" ]] \
+        || [[ "${agent_yaml}" -nt "${build_dir}/agent.conf" ]] \
+        || [[ "${SANDBOX_ROOT}/config/versions.env" -nt "${build_dir}/agent.conf" ]] \
+        || [[ "${SANDBOX_ROOT}/lib/versions.sh" -nt "${build_dir}/agent.conf" ]]; then
         log_info "Compiling agent config: ${agent_type}"
         python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile "${agent_type}"
     fi
@@ -109,6 +118,11 @@ ensure_global_compiled() {
     # Source the compiled config if it exists, otherwise set defaults
     if [[ -f "${build_conf}" ]]; then
         source "${build_conf}"
+        # Try a Firecracker build without installing it system-wide, e.g.
+        #   sudo SANDBOX_FIRECRACKER_BIN=/tmp/fc/firecracker \
+        #        SANDBOX_JAILER_BIN=/tmp/fc/jailer bin/sandbox-ctl launch coder
+        FIRECRACKER_BIN="${SANDBOX_FIRECRACKER_BIN:-${FIRECRACKER_BIN}}"
+        JAILER_BIN="${SANDBOX_JAILER_BIN:-${JAILER_BIN}}"
     else
         # Minimal defaults so scripts don't crash during bootstrap
         STATE_DIR="${SANDBOX_ROOT}/state"
