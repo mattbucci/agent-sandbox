@@ -102,7 +102,7 @@ done
 
 echo "== memory config"
 check "memory backend + mental-model plan (test/test_memory_config.py)" \
-    python3 -m unittest "${SANDBOX_ROOT}/test/test_memory_config.py"
+    python3 "${SANDBOX_ROOT}/test/test_memory_config.py"
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

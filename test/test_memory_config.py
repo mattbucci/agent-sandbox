@@ -2,7 +2,7 @@
 Tests for the memory part of the config compiler (lib/agentconf.py): backend
 selection and the declared mental-model plan.
 
-Run:  python3 -m unittest test/test_memory_config.py     (needs PyYAML)
+Run:  python3 test/test_memory_config.py     (needs PyYAML)
 """
 import os
 import sys
