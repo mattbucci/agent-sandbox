@@ -148,8 +148,11 @@ Durable agent memory is part of the hosted agent surface. With
 service on the host (`sandbox-ctl memory start`, `:8890`) gives the agents a
 memory hierarchy — facts extracted from every turn, observations consolidated
 from them, and mental models you declare in YAML — recalled before each turn
-and retained after it. See [Agent memory](docs/memory.md) and
-[ADR 0005](docs/adr/0005-hindsight-hierarchical-memory.md). The earlier
+and retained after it. Each agent has its own memory credential, and a policy
+from the YAML decides which banks, memories and mental models it can reach
+(`sandbox-ctl memory access`). See [Agent memory](docs/memory.md),
+[ADR 0005](docs/adr/0005-hindsight-hierarchical-memory.md) and
+[ADR 0006](docs/adr/0006-per-agent-memory-access.md). The earlier
 [mnemosyne](docs/hermes-gateway.md#agent-memory-mnemosyne) MCP store remains
 available as `memory.backend: mnemosyne`
 ([ADR 0002](docs/adr/0002-agent-memory-hosted-surface.md)).

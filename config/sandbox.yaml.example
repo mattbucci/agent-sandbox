@@ -127,12 +127,26 @@ memory:
   # Model for fact extraction, consolidation and mental models (default: llm.model).
   # llm_model: gemma
   # max_completion_tokens: 16000    # keep under the model's output limit
-  # shared: an agent recalls from every agent's memories. agent: only its own
-  # (and untagged ones). Overridable per agent (memory.recall_scope).
-  recall_scope: shared
-  # Mental models shared by every agent. Per-agent ones go under
-  # `memory.mental_models` in config/agents/<type>.yaml and are built only from
-  # that agent's memories. Apply changes with `sandbox-ctl memory apply`.
+  # Who can reach what. Each agent has its own credential and the service
+  # enforces this policy (docs/memory.md#who-can-reach-what). Words: own (the
+  # agent's tag), shared (untagged), all, an agent type, or any tag.
+  # Default for every agent; override per agent under `memory.access` in its YAML.
+  access:
+    read: [all]              # e.g. [own, shared] to keep agents out of each other's memories
+    write: [own]             # [] makes an agent read-only
+  # Additional banks; grant them per agent with `memory.banks` in its YAML.
+  # banks:
+  #   advisories:
+  #     mission: Security advisories and how they were handled.
+  #     mental_models:
+  #       - id: open-cves
+  #         name: Open CVEs
+  #         query: Which vulnerabilities are still open, and what is blocking each?
+  # Mental models. Each takes optional `visible_to` (who may read it) and
+  # `sources` (whose memories it is written from): `all` or a list of agents.
+  # Here both default to all; ones under `memory.mental_models` in
+  # config/agents/<type>.yaml default to that agent. Apply with
+  # `sandbox-ctl memory apply`; inspect with `sandbox-ctl memory access`.
   mental_models:
     - id: environment
       name: Sandbox environment

@@ -9,7 +9,9 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib", "hindsight_ext"))
 import agentconf  # noqa: E402
+import memory_policy  # noqa: E402
 
 GLOBAL = {
     "llm": {"model": "gemma"},
@@ -70,8 +72,15 @@ class AgentConfTest(unittest.TestCase):
         conf = self.conf(GLOBAL, AGENTS["coder"])
         self.assertEqual(conf["HINDSIGHT_ENABLED"], '"1"')
         self.assertEqual(conf["MNEMOSYNE_ENABLED"], '"0"')
-        self.assertEqual(conf["HINDSIGHT_TOKEN"], '"hs_x"')
         self.assertEqual(conf["HINDSIGHT_BANK"], '"agent-sandbox"')
+
+    def test_agent_gets_its_own_token_never_the_master(self):
+        coder = self.conf(GLOBAL, AGENTS["coder"])["HINDSIGHT_TOKEN"].strip('"')
+        debugger = self.conf(GLOBAL, AGENTS["debugger"])["HINDSIGHT_TOKEN"].strip('"')
+        self.assertTrue(coder.startswith("hsa_"))
+        self.assertNotEqual(coder, "hs_x")
+        self.assertNotEqual(coder, debugger)
+        self.assertEqual(coder, memory_policy.agent_token("hs_x", "coder"))
 
     def test_mnemosyne_backend_is_unchanged(self):
         conf = self.conf({"memory": {"enabled": True, "token": "m"}}, AGENTS["coder"])
@@ -79,12 +88,18 @@ class AgentConfTest(unittest.TestCase):
         self.assertEqual(conf["HINDSIGHT_ENABLED"], '"0"')
         self.assertEqual(conf["HINDSIGHT_TOKEN"], '""')   # not handed out when unused
 
-    def test_agent_can_opt_out_and_override_scope(self):
+    def test_agent_can_opt_out_and_use_another_primary_bank(self):
         agent = {"agent": {"type": "x", "name": "X"}, "memory": {"enabled": False}}
-        self.assertEqual(self.conf(GLOBAL, agent)["HINDSIGHT_ENABLED"], '"0"')
-        agent = {"agent": {"type": "x", "name": "X"}, "memory": {"recall_scope": "agent", "bank": "private"}}
         conf = self.conf(GLOBAL, agent)
-        self.assertEqual((conf["MEMORY_RECALL_SCOPE"], conf["HINDSIGHT_BANK"]), ('"agent"', '"private"'))
+        self.assertEqual((conf["HINDSIGHT_ENABLED"], conf["HINDSIGHT_TOKEN"]), ('"0"', '""'))
+        agent = {"agent": {"type": "x", "name": "X"}, "memory": {"bank": "private"}}
+        self.assertEqual(self.conf(GLOBAL, agent)["HINDSIGHT_BANK"], '"private"')
+
+    def test_extra_banks_lists_only_readable_ones(self):
+        agent = {"agent": {"type": "x", "name": "X"},
+                 "memory": {"banks": {"research": {"read": ["all"], "write": []},
+                                      "dropbox": {"read": [], "write": ["own"]}}}}
+        self.assertEqual(self.conf(GLOBAL, agent)["HINDSIGHT_EXTRA_BANKS"], '"research"')
 
     def test_model_limits_only_when_configured(self):
         self.assertNotIn("OMP_MAX_TOKENS", self.conf(GLOBAL, AGENTS["coder"]))
@@ -92,6 +107,129 @@ class AgentConfTest(unittest.TestCase):
         agent = {"agent": {"type": "x", "name": "X"}, "vm": {"max_output_tokens": 4096}}
         conf = self.conf(g, agent)
         self.assertEqual((conf["OMP_CONTEXT_WINDOW"], conf["OMP_MAX_TOKENS"]), ('"32768"', '"4096"'))
+
+
+class AccessPolicyTest(unittest.TestCase):
+    """memory.access / memory.banks -> the policy the service enforces."""
+
+    def policy(self, agents, memory=None):
+        g = {"memory": {"enabled": True, "backend": "hindsight", "token": "hs_x", **(memory or {})}}
+        plan = agentconf.memory_plan(g, agents)
+        return plan["policy"]["principals"], plan["errors"]
+
+    def agent(self, **memory):
+        return {"agent": {"type": "x", "name": "X"}, "memory": memory} if memory else {"agent": {"type": "x", "name": "X"}}
+
+    def test_default_is_read_everything_write_own(self):
+        principals, errors = self.policy({"coder": self.agent(), "debugger": self.agent()})
+        self.assertEqual(errors, [])
+        entry = principals["coder"]["banks"]["agent-sandbox"]
+        self.assertTrue(entry["read_all"])
+        self.assertEqual(entry["write"], ["agent:coder"])
+        self.assertEqual(entry["default_tags"], ["agent:coder"])
+
+    def test_admin_is_the_master_token_and_agents_are_derived(self):
+        principals, _ = self.policy({"coder": self.agent()})
+        self.assertTrue(principals["admin"]["admin"])
+        self.assertEqual(principals["admin"]["token_sha256"], memory_policy.token_digest("hs_x"))
+        self.assertEqual(principals["coder"]["token_sha256"],
+                         memory_policy.token_digest(memory_policy.agent_token("hs_x", "coder")))
+        self.assertNotIn("hs_x", str(principals))          # digests only
+
+    def test_access_words_resolve_to_tags(self):
+        agents = {"coder": self.agent(access={"read": ["own", "shared", "debugger", "team:platform"], "write": ["own"]}),
+                  "debugger": self.agent()}
+        entry = self.policy(agents)[0]["coder"]["banks"]["agent-sandbox"]
+        self.assertEqual(entry["read"], ["agent:coder", "agent:debugger", "team:platform"])
+        self.assertTrue(entry["read_untagged"])
+        self.assertFalse(entry["read_all"])
+
+    def test_global_default_and_per_agent_override(self):
+        agents = {"coder": self.agent(), "security": self.agent(access={"read": ["own"], "write": ["own"]})}
+        principals, _ = self.policy(agents, {"access": {"read": ["own", "shared"], "write": ["own"]}})
+        self.assertTrue(principals["coder"]["banks"]["agent-sandbox"]["read_untagged"])
+        sec = principals["security"]["banks"]["agent-sandbox"]
+        self.assertEqual((sec["read"], sec["read_untagged"]), (["agent:security"], False))
+
+    def test_legacy_recall_scope_agent_means_own_and_shared(self):
+        entry = self.policy({"coder": self.agent(recall_scope="agent")})[0]["coder"]["banks"]["agent-sandbox"]
+        self.assertEqual((entry["read"], entry["read_untagged"], entry["read_all"]), (["agent:coder"], True, False))
+
+    def test_read_only_and_additional_banks(self):
+        agents = {"researcher": self.agent(access={"read": ["all"], "write": []},
+                                           banks={"research": {"read": ["all"], "write": ["own"]}})}
+        principals, errors = self.policy(agents, {"banks": {"research": {"mission": "Papers."}}})
+        self.assertEqual(errors, [])
+        banks = principals["researcher"]["banks"]
+        self.assertEqual(banks["agent-sandbox"]["write"], [])
+        self.assertEqual(banks["agent-sandbox"]["default_tags"], [])
+        self.assertEqual(banks["research"]["write"], ["agent:researcher"])
+
+    def test_agents_cannot_be_granted_shared_or_whole_bank_writes(self):
+        for word in ("shared", "all"):
+            _, errors = self.policy({"coder": self.agent(access={"read": ["all"], "write": [word]})})
+            self.assertEqual(len(errors), 1, word)
+            self.assertIn("admin-only", errors[0])
+
+    def test_undeclared_extra_bank_is_an_error(self):
+        _, errors = self.policy({"coder": self.agent(banks={"nowhere": {"read": ["all"]}})})
+        self.assertTrue(any("not declared under memory.banks" in e for e in errors))
+
+    def test_agent_without_memory_has_no_principal(self):
+        principals, _ = self.policy({"coder": self.agent(enabled=False)})
+        self.assertNotIn("coder", principals)
+
+
+class MentalModelScopeTest(unittest.TestCase):
+    """visible_to (who may read a model) and sources (what it is built from)."""
+
+    def models(self, shared=(), agents=None, banks=None):
+        g = {"memory": {"enabled": True, "backend": "hindsight", "token": "t",
+                        "mental_models": list(shared), "banks": banks or {}}}
+        plan = agentconf.memory_plan(g, agents or {"coder": {"agent": {"type": "coder"}}, "debugger": {"agent": {"type": "debugger"}}})
+        return {(m["bank"], m["id"]): m for m in plan["mental_models"]}, plan["errors"]
+
+    EVERYTHING = [{"not": {"tags": ["__no_such_tag__"], "match": "any_strict"}}]
+
+    def test_shared_model_defaults_to_everyone_and_the_whole_bank(self):
+        models, errors = self.models([{"name": "Env", "query": "q"}])
+        m = models[("agent-sandbox", "env")]
+        self.assertEqual((errors, m["tags"], m["trigger"]["tag_groups"]), ([], [], self.EVERYTHING))
+        self.assertTrue(m["trigger"]["refresh_after_consolidation"])
+
+    def test_visibility_and_sources_are_independent(self):
+        models, _ = self.models([{"id": "handoff", "name": "Handoff", "query": "q",
+                                  "visible_to": ["coder", "debugger"], "sources": ["debugger"]},
+                                 {"id": "digest", "name": "Digest", "query": "q", "visible_to": ["coder"], "sources": "all"}])
+        handoff = models[("agent-sandbox", "handoff")]
+        self.assertEqual(handoff["tags"], ["agent:coder", "agent:debugger"])
+        self.assertEqual(handoff["trigger"]["tag_groups"], [{"tags": ["agent:debugger"], "match": "any_strict"}])
+        digest = models[("agent-sandbox", "digest")]
+        self.assertEqual((digest["tags"], digest["trigger"]["tag_groups"]), (["agent:coder"], self.EVERYTHING))
+
+    def test_agent_model_defaults_to_that_agent_for_both(self):
+        agents = {"coder": {"agent": {"type": "coder"}, "memory": {"mental_models": [{"id": "pb", "name": "PB", "query": "q"}]}}}
+        m = self.models(agents=agents)[0][("agent-sandbox", "coder-pb")]
+        self.assertEqual(m["tags"], ["agent:coder"])
+        self.assertEqual(m["trigger"]["tag_groups"], [{"tags": ["agent:coder"], "match": "any_strict"}])
+
+    def test_models_in_additional_banks(self):
+        models, errors = self.models(banks={"research": {"mental_models": [{"name": "Reading list", "query": "q"}]}})
+        self.assertEqual(errors, [])
+        self.assertIn(("research", "reading-list"), models)
+
+    def test_bad_scope_is_an_error(self):
+        _, errors = self.models([{"name": "X", "query": "q", "visible_to": []}])
+        self.assertTrue(any("visible_to" in e for e in errors))
+
+
+class TagGroupNormalizationTest(unittest.TestCase):
+    def test_server_defaults_do_not_count_as_a_change(self):
+        ours = [{"not": {"tags": ["x"], "match": "any_strict"}}]
+        theirs = [{"not": {"tags": ["x"], "match": "any_strict", "resolve": "exact"}}]
+        self.assertEqual(agentconf._norm_tag_groups(theirs), ours)
+        self.assertNotEqual(agentconf._norm_tag_groups([{"tags": ["x"], "match": "any_strict", "resolve": "fuzzy"}]),
+                            [{"tags": ["x"], "match": "any_strict"}])
 
 
 if __name__ == "__main__":

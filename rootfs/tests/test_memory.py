@@ -55,6 +55,11 @@ class FakeHindsight:
                     return self._reply(500, {"detail": "boom"})
                 if self.headers.get("Authorization") != "Bearer tok":
                     return self._reply(401, {"detail": "unauthorized"})
+                if "/banks/forbidden/" in self.path:
+                    return self._reply(403, {"detail": "not permitted"})
+                path = self.path.replace("/banks/research/", "/banks/agent-sandbox/")
+                if path != self.path:
+                    self.path = path
                 if self.path.startswith(BANK + "/mental-models"):
                     fake.model_reads += 1
                     return self._reply(200, {"items": fake.models})
@@ -117,11 +122,36 @@ class MemoryTest(unittest.TestCase):
         self.assertNotIn("tags", body)          # every agent's memories
         self.assertEqual(body["budget"], "low")
 
-    def test_recall_scope_agent_filters_to_own_and_untagged(self):
-        self.make(MEMORY_RECALL_SCOPE="agent").recall("x")
-        body = self.fake.posts("/memories/recall")[0][3]
-        self.assertEqual(body["tags"], ["agent:coder"])
-        self.assertEqual(body["tags_match"], "any")   # 'any' includes untagged = shared
+    def test_scoping_is_left_to_the_service(self):
+        # The token identifies the agent; the service confines the search. The
+        # client must not send a tag filter that could be mistaken for one.
+        self.make().recall("x")
+        self.assertNotIn("tags", self.fake.posts("/memories/recall")[0][3])
+
+    # ---- additional banks
+    def test_extra_banks_are_recalled_and_their_models_loaded(self):
+        m = self.make(HINDSIGHT_EXTRA_BANKS="research, agent-sandbox ,")
+        self.assertEqual(m.read_banks, ["agent-sandbox", "research"])   # primary first, no duplicate
+        results = m.recall("pnpm", max_tokens=800)
+        self.assertEqual({r["bank"] for r in results}, {"agent-sandbox", "research"})
+        bodies = [r[3] for r in self.fake.requests if r[1].endswith("/memories/recall")]
+        self.assertEqual([b["max_tokens"] for b in bodies], [400, 400])   # budget split between banks
+        names = [x["name"] for x in m.mental_models()]
+        self.assertIn("Sandbox environment", names)
+        self.assertIn("Sandbox environment (research)", names)            # labelled by bank
+        ctx = m.context("pnpm")
+        self.assertIn("research] The team uses pnpm.", ctx)
+
+    def test_one_unreachable_bank_does_not_lose_the_others(self):
+        m = self.make(HINDSIGHT_EXTRA_BANKS="forbidden")
+        self.assertEqual({r["bank"] for r in m.recall("x")}, {"agent-sandbox"})
+        self.assertTrue(m.mental_models())
+
+    def test_retain_goes_only_to_the_primary_bank(self):
+        m = self.make(HINDSIGHT_EXTRA_BANKS="research")
+        m.retain_turn("s", "We use pnpm.", "Noted.")
+        m.flush()
+        self.assertEqual([r[1] for r in self.fake.requests if r[0] == "POST"], [BANK + "/memories"])
 
     # ---- before a turn
     def test_context_orders_models_before_memories_and_frames_them(self):

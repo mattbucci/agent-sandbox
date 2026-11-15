@@ -101,8 +101,12 @@ PY
 done
 
 echo "== memory config"
-check "memory backend + mental-model plan (test/test_memory_config.py)" \
+check "memory backend, access policy + mental-model plan (test/test_memory_config.py)" \
     python3 "${SANDBOX_ROOT}/test/test_memory_config.py"
+check "per-agent access policy logic (test/test_memory_policy.py)" \
+    python3 "${SANDBOX_ROOT}/test/test_memory_policy.py"
+check "Hindsight extension compiles" \
+    python3 -m py_compile "${SANDBOX_ROOT}/lib/hindsight_ext/sandbox_memory_policy.py"
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
