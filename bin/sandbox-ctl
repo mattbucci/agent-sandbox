@@ -824,7 +824,7 @@ cmd_memory() {
     local hs_bin="${venv_dir}/bin/hindsight-api"
     local hs_log="${LOG_DIR}/hindsight.log"
     local port="${HINDSIGHT_PORT:-8890}"
-    local token="${HINDSIGHT_TOKEN:-}"
+    local token="${HINDSIGHT_ADMIN_TOKEN:-}"   # admin; agents get derived tokens
     local policy_file="${hs_dir}/policy.json"
 
     hindsight_pid() {

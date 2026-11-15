@@ -74,6 +74,12 @@ class AgentConfTest(unittest.TestCase):
         self.assertEqual(conf["MNEMOSYNE_ENABLED"], '"0"')
         self.assertEqual(conf["HINDSIGHT_BANK"], '"agent-sandbox"')
 
+    def test_master_token_appears_nowhere_in_a_hindsight_agents_conf(self):
+        # memory.token is the admin credential under hindsight; a VM must only
+        # ever hold the agent's derived token.
+        text = agentconf.compile_agent_conf(AGENTS["coder"], GLOBAL)
+        self.assertNotIn("hs_x", text)
+
     def test_agent_gets_its_own_token_never_the_master(self):
         coder = self.conf(GLOBAL, AGENTS["coder"])["HINDSIGHT_TOKEN"].strip('"')
         debugger = self.conf(GLOBAL, AGENTS["debugger"])["HINDSIGHT_TOKEN"].strip('"')

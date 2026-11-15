@@ -777,7 +777,9 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
     mnemosyne_enabled = 1 if mem_on and mem["backend"] == "mnemosyne" else 0
     hindsight_enabled = 1 if mem_on and mem["backend"] == "hindsight" else 0
     mnemosyne_port = mem["port"] if mem["backend"] == "mnemosyne" else 8077
-    mnemosyne_token = mem["token"]
+    # Only when mnemosyne is the backend: under hindsight memory.token is the
+    # ADMIN credential and must never be written into a VM.
+    mnemosyne_token = mem["token"] if mnemosyne_enabled else ""
     agent_hs_token, agent_extra_banks = "", []
     if hindsight_enabled:
         agent_type_ = agent_info.get("type", "generic")
@@ -917,10 +919,13 @@ def cmd_compile_global():
         f'MEMORY_ENABLED={1 if mem["enabled"] else 0}',
         f'MEMORY_BACKEND="{mem["backend"]}"',
         f'MNEMOSYNE_PORT={mem["port"] if mem["backend"] == "mnemosyne" else 8077}',
-        f'MNEMOSYNE_TOKEN="{mem["token"]}"',
+        f'MNEMOSYNE_TOKEN="{mem["token"] if mem["backend"] == "mnemosyne" else ""}"',
         f'MNEMOSYNE_EMBEDDINGS="{mem["embeddings"]}"',
         f'HINDSIGHT_PORT={mem["port"] if mem["backend"] == "hindsight" else 8890}',
-        f'HINDSIGHT_TOKEN="{mem["token"]}"',
+        # The admin credential, under a name no per-VM file uses: the launch
+        # scripts source this file, and a VM must only ever receive the agent's
+        # own HINDSIGHT_TOKEN from its agent.conf.
+        f'HINDSIGHT_ADMIN_TOKEN="{mem["token"] if mem["backend"] == "hindsight" else ""}"',
         f'HINDSIGHT_BANK="{mem["bank"]}"',
         f'HINDSIGHT_LLM_MODEL="{mem["llm_model"]}"',
         f'HINDSIGHT_MAX_COMPLETION_TOKENS={mem["max_completion_tokens"]}',
