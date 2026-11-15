@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,11 +40,18 @@ import (
 //     and releases it only when the run reaches a terminal state (or a TTL).
 //     The follow-up endpoints acquire NO slot; the supervisor already holds it.
 
+// runPollInterval is how often the supervisor polls the backend for the run's
+// status while holding the agent's slot. Atomic because supervisors outlive the
+// request that started them: a test shrinking the interval must not race a
+// supervisor goroutine still polling from an earlier run.
+var runPollInterval = func() *atomic.Int64 {
+	v := new(atomic.Int64)
+	v.Store(int64(2 * time.Second))
+	return v
+}()
+
 // Runs-API tuning. Package vars (not consts) so tests can shrink them.
 var (
-	// runPollInterval is how often the supervisor polls the backend for the
-	// run's status while holding the agent's slot.
-	runPollInterval = 2 * time.Second
 	// runSupervisorTTL bounds how long the supervisor will hold a slot for a
 	// single run before giving up (mirrors the backend's own run-status TTL).
 	runSupervisorTTL = time.Hour
@@ -471,7 +479,7 @@ func (s *server) superviseRun(runID, agent, vmIP string, release func()) {
 				return
 			}
 		}
-		time.Sleep(runPollInterval)
+		time.Sleep(time.Duration(runPollInterval.Load()))
 	}
 }
 

@@ -19,8 +19,8 @@ SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 source "${SANDBOX_ROOT}/lib/common.sh"
 ensure_global_compiled
-source "${SANDBOX_ROOT}/lib/common.sh"
 source "${SANDBOX_ROOT}/lib/network.sh"
+source "${SANDBOX_ROOT}/lib/vm.sh"
 
 INSTANCE_ID="${1:?Usage: stop.sh <instance-id>}"
 
@@ -87,22 +87,19 @@ cleanup_vm_network "${SLOT}" "${TAP_NAME}"
 
 # --- 4. Remove Squid ACL ---
 echo "[4/5] Removing Squid ACL..."
-rm -f "/etc/squid/acls/vm${SLOT}-domains.txt"
-rm -f "/etc/squid/acls/vm-${SLOT}.conf"
-# Regenerate combined allowed domains
-if ls /etc/squid/acls/vm*-domains.txt &>/dev/null 2>&1; then
-    cat /etc/squid/acls/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sort -u \
-        > /etc/squid/acls/all-allowed-domains.txt
-else
-    echo "# No VMs running" > /etc/squid/acls/all-allowed-domains.txt
-fi
+"${SANDBOX_ROOT}/network/squid/gen-acl.sh" --remove "${SLOT}"
 squid -k reconfigure 2>/dev/null || true
 
 # --- 5. Release slot and clean up ---
 echo "[5/5] Cleaning up state..."
 release_slot "${SLOT}"
 
-# Optionally keep state for debugging (controlled by env var)
+# The jailer chroot holds a hard link to the rootfs: remove it, or the image
+# stays on disk after the state directory is gone. (A restore re-creates it.)
+vm_remove_jail "${INSTANCE_ID}"
+
+# KEEP_VM_STATE=1 keeps the instance (rootfs + info.json) so the boot service
+# restores it — used on host shutdown and for debugging.
 if [[ "${KEEP_VM_STATE:-0}" == "1" ]]; then
     echo "  State preserved at ${VM_STATE_DIR} (KEEP_VM_STATE=1)"
 else

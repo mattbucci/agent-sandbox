@@ -39,6 +39,9 @@ export SANDBOX_ROOT
 # Load config (ensure_global_compiled sources build/sandbox.conf)
 source "${SANDBOX_ROOT}/lib/common.sh"
 ensure_global_compiled
+source "${SANDBOX_ROOT}/lib/network.sh"
+source "${SANDBOX_ROOT}/lib/vm.sh"
+source "${SANDBOX_ROOT}/lib/versions.sh"
 
 # --- Commands ---
 
@@ -79,7 +82,7 @@ cmd_setup() {
     echo ""
 
     log_ok "Setup complete! Next steps:"
-    echo "  1. Edit config/sandbox.conf with your LiteLLM URL and API key"
+    echo "  1. Edit config/sandbox.yaml with your LLM endpoint and API key"
     echo "  2. Run: sudo sandbox-ctl build-base"
     echo "  3. Run: sudo sandbox-ctl build-all"
     echo "  4. Run: sudo sandbox-ctl launch <agent-type>"
@@ -250,6 +253,11 @@ cmd_stop_all() {
     require_root "stop-all"
     local count=0
 
+    # --keep-state: stop the VMs but keep each instance (rootfs + info.json) so
+    # the boot service restores it. Used by the systemd unit on host shutdown.
+    local keep_state=0
+    [[ "${1:-}" == "--keep-state" ]] && keep_state=1
+
     if [[ ! -d "${STATE_DIR}/vms" ]]; then
         log_info "No VMs running."
         return
@@ -263,15 +271,20 @@ cmd_stop_all() {
         pid=$(jq -r '.firecracker_pid' "${info}")
 
         if kill -0 "${pid}" 2>/dev/null; then
-            "${SANDBOX_ROOT}/vm/stop.sh" "${instance_id}"
-            ((count++))
-        else
+            # One VM failing to stop must not leave the rest running.
+            if KEEP_VM_STATE="${keep_state}" "${SANDBOX_ROOT}/vm/stop.sh" "${instance_id}"; then
+                count=$((count + 1))
+            else
+                log_warn "Failed to stop ${instance_id} cleanly."
+            fi
+        elif [[ ${keep_state} -eq 0 ]]; then
             # Clean up stale state
             local slot tap
             slot=$(jq -r '.slot' "${info}")
             tap=$(jq -r '.tap_device' "${info}")
-            source "${SANDBOX_ROOT}/lib/network.sh"
             cleanup_vm_network "${slot}" "${tap}" 2>/dev/null || true
+            "${SANDBOX_ROOT}/network/squid/gen-acl.sh" --remove "${slot}" >/dev/null || true
+            vm_remove_jail "${instance_id}"
             rm -rf "$(dirname "${info}")"
         fi
     done
@@ -482,29 +495,36 @@ cmd_cleanup() {
             local slot tap
             slot=$(jq -r '.slot' "${info}")
             tap=$(jq -r '.tap_device' "${info}")
-            source "${SANDBOX_ROOT}/lib/network.sh"
             cleanup_vm_network "${slot}" "${tap}" 2>/dev/null || true
 
-            # Remove Squid ACLs
-            rm -f "/etc/squid/acls/vm${slot}-domains.txt"
-            rm -f "/etc/squid/acls/vm-${slot}.conf"
+            # Remove Squid ACLs (and regenerate the combined files)
+            "${SANDBOX_ROOT}/network/squid/gen-acl.sh" --remove "${slot}" >/dev/null
 
-            # Remove state
+            # Remove state (and the jailer chroot holding the rootfs hard link)
+            vm_remove_jail "${instance_id}"
             rm -rf "${vm_dir}"
-            ((cleaned++))
+            cleaned=$((cleaned + 1))
         fi
     done
 
-    # Regenerate combined Squid allowlist
-    if ls /etc/squid/acls/vm*-domains.txt &>/dev/null 2>&1; then
-        cat /etc/squid/acls/vm*-domains.txt 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sort -u \
-            > /etc/squid/acls/all-allowed-domains.txt
-    else
-        echo "# No VMs running" > /etc/squid/acls/all-allowed-domains.txt
+    # Sweep jailer chroots whose VM no longer exists. Each one pins a full
+    # rootfs image on disk; older versions never removed them on stop.
+    local jail_parent orphans=0 jail jail_id
+    jail_parent="$(dirname "$(vm_jail_dir x)")"
+    if [[ -d "${jail_parent}" ]]; then
+        for jail in "${jail_parent}"/*/; do
+            [[ -d "${jail}" ]] || continue
+            jail_id="$(basename "${jail}")"
+            [[ -d "${STATE_DIR}/vms/${jail_id}" ]] && continue
+            log_info "Removing orphaned jailer chroot: ${jail_id} ($(du -sh "${jail}" 2>/dev/null | cut -f1))"
+            vm_remove_jail "${jail_id}"
+            orphans=$((orphans + 1))
+        done
     fi
+
     squid -k reconfigure 2>/dev/null || true
 
-    log_ok "Cleaned up ${cleaned} stopped VM(s)."
+    log_ok "Cleaned up ${cleaned} stopped VM(s), ${orphans} orphaned jailer chroot(s)."
 }
 
 cmd_gateway() {
@@ -602,9 +622,9 @@ cmd_gateway() {
                 exit 1
             fi
 
-            local hermes_image="nousresearch/hermes-agent:v2026.6.19"
+            local hermes_image="nousresearch/hermes-agent:${HERMES_AGENT_VERSION}"
             local image_dir="${SANDBOX_ROOT}/rootfs/agents/hermes/images"
-            local image_tar="${image_dir}/hermes-agent-v2026.6.19.tar"
+            local image_tar="${image_dir}/hermes-agent-${HERMES_AGENT_VERSION}.tar"
 
             if [[ -f "${image_tar}" && ${force} -eq 0 ]]; then
                 log_info "Image tar already staged: ${image_tar}"
@@ -679,7 +699,7 @@ cmd_gateway() {
             echo "  start              Compile + build if needed, then launch the router (background)"
             echo "  stop               Stop the running router"
             echo "  status             Show router status, listen addr, and exposed agents"
-            echo "  prebake-hermes     Pull+save nousresearch/hermes-agent:v2026.6.19 for baking (--force to re-pull)"
+            echo "  prebake-hermes     Pull+save nousresearch/hermes-agent:${HERMES_AGENT_VERSION} for baking (--force to re-pull)"
             ;;
     esac
 }
@@ -768,10 +788,10 @@ cmd_mnemosyne() {
                     uv venv --python 3.12 "${venv_dir}"
                 fi
                 log_info "Installing mnemosyne-memory${extras} into venv (uv)..."
-                if ! uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory${extras}"; then
+                if ! uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory${extras}==${MNEMOSYNE_VERSION}"; then
                     if [[ "${extras}" != "[mcp]" ]]; then
                         log_warn "Install with ${extras} failed; retrying FTS5 keyword-only..."
-                        uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory[mcp]"
+                        uv pip install --python "${venv_dir}/bin/python" "mnemosyne-memory[mcp]==${MNEMOSYNE_VERSION}"
                     else
                         log_error "Failed to install mnemosyne-memory[mcp]."; exit 1
                     fi
@@ -793,10 +813,10 @@ cmd_mnemosyne() {
                 fi
                 "${venv_dir}/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
                 log_info "Installing mnemosyne-memory${extras} into venv..."
-                if ! "${venv_dir}/bin/python" -m pip install "mnemosyne-memory${extras}"; then
+                if ! "${venv_dir}/bin/python" -m pip install "mnemosyne-memory${extras}==${MNEMOSYNE_VERSION}"; then
                     if [[ "${extras}" != "[mcp]" ]]; then
                         log_warn "Install with ${extras} failed; retrying FTS5 keyword-only..."
-                        "${venv_dir}/bin/python" -m pip install "mnemosyne-memory[mcp]"
+                        "${venv_dir}/bin/python" -m pip install "mnemosyne-memory[mcp]==${MNEMOSYNE_VERSION}"
                     else
                         log_error "Failed to install mnemosyne-memory[mcp]."; exit 1
                     fi
@@ -927,6 +947,162 @@ cmd_mnemosyne() {
     esac
 }
 
+# --- Pinned versions (config/versions.env) ---
+# Each row: label | pinned variable | "installed" probe | upstream GitHub repo.
+versions_rows() {
+    cat <<'ROWS'
+firecracker|FIRECRACKER_VERSION|firecracker --version|firecracker-microvm/firecracker
+jailer|FIRECRACKER_VERSION|jailer --version|firecracker-microvm/firecracker
+otelcol-contrib|OTELCOL_VERSION|otelcol-contrib --version|open-telemetry/opentelemetry-collector-releases
+noVNC|NOVNC_VERSION|git -C /opt/novnc describe --tags|novnc/noVNC
+websockify|WEBSOCKIFY_VERSION|websockify --version|novnc/websockify
+guest kernel (prebuilt)|GUEST_KERNEL_VERSION||
+guest kernel (source)|KERNEL_SRC_VERSION||
+uv (guest)|UV_VERSION||astral-sh/uv
+node major (guest)|NODE_MAJOR||
+agent-browser (guest)|AGENT_BROWSER_VERSION||
+docker compose (guest)|COMPOSE_VERSION||docker/compose
+helm (guest)|HELM_VERSION||helm/helm
+trivy (guest)|TRIVY_VERSION||aquasecurity/trivy
+grype (guest)|GRYPE_VERSION||anchore/grype
+sentry-cli (guest)|SENTRY_CLI_VERSION||getsentry/sentry-cli
+kubernetes apt (guest)|KUBERNETES_APT_SERIES||kubernetes/kubernetes
+mnemosyne|MNEMOSYNE_VERSION||
+hermes-agent|HERMES_AGENT_VERSION||NousResearch/hermes-agent
+ROWS
+}
+
+# Every checksummed artifact: sha256 variable | URL (expanded from the pins).
+versions_artifacts() {
+    cat <<ARTIFACTS
+FIRECRACKER_SHA256|https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz
+GUEST_KERNEL_SHA256|https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${GUEST_KERNEL_CI_SERIES}/x86_64/vmlinux-${GUEST_KERNEL_VERSION}
+KERNEL_SRC_SHA256|https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_SRC_VERSION}.tar.xz
+OTELCOL_SHA256|https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz
+UV_SHA256|https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz
+COMPOSE_SHA256|https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64
+HELM_SHA256|https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz
+TRIVY_SHA256|https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+GRYPE_SHA256|https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz
+SENTRY_CLI_SHA256|https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/sentry-cli-Linux-x86_64
+ARTIFACTS
+}
+
+cmd_versions() {
+    local subcmd="${1:-show}"
+    local label var probe repo
+
+    case "${subcmd}" in
+        show)
+            printf "%-26s %-14s %s\n" "COMPONENT" "PINNED" "INSTALLED (host)"
+            while IFS='|' read -r label var probe repo; do
+                local installed="-"
+                if [[ -n "${probe}" ]]; then
+                    # shellcheck disable=SC2086
+                    installed=$(${probe} 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || true
+                    installed="${installed:-not installed}"
+                fi
+                printf "%-26s %-14s %s\n" "${label}" "${!var}" "${installed}"
+            done < <(versions_rows)
+            ;;
+
+        outdated)
+            # Pinned vs the newest upstream release (GitHub API; set GH_TOKEN /
+            # GITHUB_TOKEN to avoid the anonymous rate limit). Informational:
+            # the pin policy is "newest release at least 14 days old".
+            local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+            local auth=()
+            [[ -n "${token}" ]] && auth=(-H "Authorization: Bearer ${token}")
+            printf "%-26s %-14s %-14s %s\n" "COMPONENT" "PINNED" "LATEST" "RELEASED"
+            while IFS='|' read -r label var probe repo; do
+                [[ -n "${repo}" ]] || continue
+                local latest published
+                read -r latest published < <(curl -fsSL --max-time 20 "${auth[@]}" \
+                    "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+                    | jq -r '"\(.tag_name) \(.published_at[0:10])"' 2>/dev/null) || true
+                printf "%-26s %-14s %-14s %s\n" "${label}" "${!var}" "${latest:-?}" "${published:-}"
+            done < <(versions_rows)
+            ;;
+
+        verify)
+            # Re-download every pinned artifact and check it against its sha256.
+            local sha_var url tmp failed=0
+            tmp="$(mktemp -d)"
+            # shellcheck disable=SC2064
+            trap "rm -rf '${tmp}'" RETURN
+            while IFS='|' read -r sha_var url; do
+                if fetch_verified "${url}" "${!sha_var}" "${tmp}/artifact" 2>"${tmp}/err"; then
+                    log_ok "${sha_var}"
+                else
+                    log_error "${sha_var}: $(tr '\n' ' ' < "${tmp}/err")"
+                    failed=$((failed + 1))
+                fi
+                rm -f "${tmp}/artifact"
+            done < <(versions_artifacts)
+            local commit
+            commit=$(git ls-remote --tags https://github.com/novnc/noVNC.git "${NOVNC_VERSION}^{}" | cut -f1)
+            if [[ "${commit}" == "${NOVNC_COMMIT}" ]]; then
+                log_ok "NOVNC_COMMIT"
+            else
+                log_error "NOVNC_COMMIT: tag ${NOVNC_VERSION} is ${commit:-missing}, pinned ${NOVNC_COMMIT}"
+                failed=$((failed + 1))
+            fi
+            [[ ${failed} -eq 0 ]] || { log_error "${failed} pin(s) failed verification."; return 1; }
+            log_ok "All pinned artifacts match their checksums."
+            ;;
+
+        *)
+            echo "Usage: sandbox-ctl versions <show|outdated|verify>"
+            echo ""
+            echo "  show       Pinned versions (config/versions.env) vs what is installed on this host"
+            echo "  outdated   Pinned versions vs the newest upstream release"
+            echo "  verify     Re-download every pinned artifact and check its sha256"
+            ;;
+    esac
+}
+
+# --- Agent runtime Python dependencies ---
+cmd_deps() {
+    local subcmd="${1:-help}"
+    local agent_dir="${SANDBOX_ROOT}/rootfs/overlay/opt/agent"
+
+    case "${subcmd}" in
+        lock)
+            # Resolve requirements.txt into requirements.lock: every transitive
+            # dependency pinned with sha256 hashes, for the guest's Python and
+            # platform. DEPS_EXCLUDE_NEWER (default: 14 days ago) keeps freshly
+            # published — and so least-vetted — releases out of the image.
+            command -v uv &>/dev/null || { log_error "'uv' is required to lock dependencies."; exit 1; }
+            local cutoff="${DEPS_EXCLUDE_NEWER:-$(date -u -d '14 days ago' +%Y-%m-%dT00:00:00Z)}"
+            log_info "Locking agent dependencies (python ${PYTHON_VERSION}, nothing newer than ${cutoff})..."
+            ( cd "${agent_dir}" && uv pip compile requirements.txt \
+                --generate-hashes \
+                --python-version "${PYTHON_VERSION}" \
+                --python-platform x86_64-unknown-linux-gnu \
+                --exclude-newer "${cutoff}" \
+                --no-header --quiet \
+                -o requirements.lock )
+            log_ok "Wrote ${agent_dir}/requirements.lock ($(grep -cE '^[A-Za-z0-9_.-]+==' "${agent_dir}/requirements.lock") packages)."
+            log_info "Rebuild the base image (sandbox-ctl build-base) to apply."
+            ;;
+        *)
+            echo "Usage: sandbox-ctl deps lock"
+            echo ""
+            echo "  lock   Regenerate the hash-pinned requirements.lock from requirements.txt"
+            ;;
+    esac
+}
+
+# --- systemd unit ---
+cmd_install_service() {
+    require_root "install-service"
+    local unit="/etc/systemd/system/agent-sandbox.service"
+    sed "s|@SANDBOX_ROOT@|${SANDBOX_ROOT}|g" "${SANDBOX_ROOT}/bin/agent-sandbox.service" > "${unit}"
+    systemctl daemon-reload
+    systemctl enable agent-sandbox.service
+    log_ok "Installed ${unit} (restores VMs, mnemosyne and the gateway at boot)."
+}
+
 cmd_help() {
     cat <<'HELP'
 sandbox-ctl — Firecracker Agent Sandbox Manager
@@ -942,9 +1118,10 @@ Setup & Build:
 VM Management:
   launch <type> [opts]     Launch a new VM (--name, --vcpus, --mem, --no-agent)
   stop <id|name|type>      Stop a running VM
-  stop-all                 Stop all running VMs
+  stop-all [--keep-state]  Stop all running VMs (--keep-state: restore them at next boot)
   status [--html]          List VMs with status info
-  cleanup                  Remove stopped VM state
+  cleanup                  Remove stopped VM state and orphaned jailer chroots
+  install-service          Install the systemd unit that restores everything at boot
 
 Access:
   vnc <id|name|type>       Print noVNC URL for a VM
@@ -956,6 +1133,12 @@ Config:
   config validate <type>   Validate an agent YAML definition
   config list-presets      List available presets by category
   config docs              Generate docs/presets-reference.md
+
+Dependencies:
+  versions show            Pinned versions (config/versions.env) vs installed
+  versions outdated        Pinned versions vs newest upstream release
+  versions verify          Re-download every pinned artifact, check its sha256
+  deps lock                Regenerate the agent's hash-pinned requirements.lock
 
 Memory (shared mnemosyne MCP service):
   mnemosyne install        Create venv + install mnemosyne-memory (prefers python3.12)
@@ -1003,6 +1186,9 @@ case "${COMMAND}" in
     mnemosyne)      cmd_mnemosyne "$@" ;;
     network-status) cmd_network_status "$@" ;;
     cleanup)        cmd_cleanup "$@" ;;
+    versions)       cmd_versions "$@" ;;
+    deps)           cmd_deps "$@" ;;
+    install-service) cmd_install_service "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         log_error "Unknown command: ${COMMAND}"

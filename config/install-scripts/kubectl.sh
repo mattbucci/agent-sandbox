@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install kubectl via Kubernetes apt repository
+# Install kubectl via the Kubernetes apt repository.
+# KUBERNETES_APT_SERIES comes from config/versions.env.
 
 if command -v kubectl &>/dev/null; then
     echo "kubectl is already installed: $(kubectl version --client --short 2>/dev/null || kubectl version --client)"
@@ -12,10 +13,10 @@ apt-get update -qq
 apt-get install -y -qq curl gnupg apt-transport-https ca-certificates
 
 mkdir -p /etc/apt/keyrings
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key \
+curl -fsSL https://pkgs.k8s.io/core:/stable:/${KUBERNETES_APT_SERIES}/deb/Release.key \
     | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
-echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /" \
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_APT_SERIES}/deb/ /" \
     > /etc/apt/sources.list.d/kubernetes.list
 
 apt-get update -qq

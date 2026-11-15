@@ -14,8 +14,11 @@ log() {
 }
 
 # Pinned image — 'latest' is NOT this build. Pre-baked tar is docker-loaded below.
-HERMES_IMAGE="nousresearch/hermes-agent:v2026.6.19"
-HERMES_TAR="/opt/hermes/images/hermes-agent-v2026.6.19.tar"
+# HERMES_AGENT_VERSION is pinned in config/versions.env and injected through
+# /etc/agent.conf by vm/prepare-rootfs.sh; the default covers older instances.
+HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-v2026.6.19}"
+HERMES_IMAGE="nousresearch/hermes-agent:${HERMES_AGENT_VERSION}"
+HERMES_TAR="/opt/hermes/images/hermes-agent-${HERMES_AGENT_VERSION}.tar"
 HERMES_DATA="/opt/hermes/data"
 
 # Defaults (start.sh exports these, but be self-contained if run directly).

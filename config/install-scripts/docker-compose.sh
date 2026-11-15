@@ -11,7 +11,7 @@ set -euo pipefail
 #   1. iptables backend — the kernel has CONFIG_IP_NF_IPTABLES=y but
 #      CONFIG_NF_TABLES is NOT set, so Ubuntu's default iptables-nft backend
 #      fails. Docker needs the legacy backend.
-#   2. Compose v2 — docker.io does not bundle the compose plugin.
+#   2. Compose — docker.io does not bundle the compose plugin.
 # =============================================================================
 
 # 1. Use the legacy iptables backend (nft backend unavailable in guest kernel).
@@ -20,8 +20,8 @@ if command -v update-alternatives &>/dev/null; then
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
 fi
 
-# 2. Install the Docker Compose v2 CLI plugin (works alongside docker.io).
-COMPOSE_VERSION="v2.29.7"
+# 2. Install the pinned Docker Compose CLI plugin (works alongside docker.io).
+#    COMPOSE_VERSION / COMPOSE_SHA256 come from config/versions.env.
 case "$(uname -m)" in
     x86_64)  COMPOSE_ARCH="x86_64" ;;
     aarch64) COMPOSE_ARCH="aarch64" ;;
@@ -29,9 +29,10 @@ case "$(uname -m)" in
 esac
 
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -fsSL \
+fetch_verified \
     "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}" \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose
+    "$(pinned_sha "${COMPOSE_SHA256}")" \
+    /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 # Back-compat: expose the classic `docker-compose` entrypoint too.

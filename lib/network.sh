@@ -3,6 +3,52 @@
 # lib/network.sh — Network helper functions for agent-sandbox
 # =============================================================================
 
+# Install the base vm_filter ruleset (default-deny for VM traffic), replacing
+# any existing table. Per-VM rules are added on top by add_vm_nftables. Used by
+# both network/setup-host-network.sh and the boot service, so the two can never
+# disagree about what a VM may reach on the host.
+# Usage: apply_base_nftables <host-iface>
+apply_base_nftables() {
+    local host_iface="$1"
+
+    nft delete table ip vm_filter 2>/dev/null || true
+
+    nft -f - <<NFT
+table ip vm_filter {
+    chain input {
+        type filter hook input priority 0; policy accept;
+
+        # VMs may reach ONLY Squid/DNS/OTel on the host gateway; everything else
+        # (host SSH, and any other local service the host happens to run) is
+        # dropped — no pivot from inside the sandbox to the host.
+        iifname "tap-vm*" ct state established,related accept
+        iifname "tap-vm*" udp dport 53 accept comment "vm-dns"
+        iifname "tap-vm*" tcp dport { ${SQUID_HTTP_PORT:-3128}, ${SQUID_HTTPS_PORT:-3129} } accept comment "vm-squid"
+        iifname "tap-vm*" tcp dport { 4317, 4318 } accept comment "vm-otel"
+        iifname "tap-vm*" drop comment "vm-drop-host"
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Allow established/related connections back to VMs
+        ct state established,related accept
+    }
+
+    chain prerouting {
+        type nat hook prerouting priority -100;
+        # Per-VM DNAT rules are added dynamically (add_vm_nftables)
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 100;
+        # NAT masquerade for outbound traffic from Squid
+        oifname "${host_iface}" masquerade
+    }
+}
+NFT
+}
+
 # Create a TAP device for a VM
 # Usage: create_tap <tap-name> <host-ip>
 create_tap() {
@@ -46,23 +92,54 @@ resolve_ipv4() {
     # Prefer getent (honours nsswitch: hosts file, DNS, etc.)
     ip=$(getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')
 
-    # Fall back to dig if getent yields nothing
+    # Fall back to dig if getent yields nothing. dig reports failures such as
+    # "network unreachable" on STDOUT, so take only a line that is an address.
     if [[ -z "${ip}" ]]; then
-        ip=$(dig +short A "${host}" 2>/dev/null | head -1)
+        ip=$(dig +short +time=2 +tries=1 A "${host}" 2>/dev/null \
+            | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') || true
     fi
 
-    if [[ -z "${ip}" ]]; then
+    # Never hand anything but a dotted-quad to the caller: the result is
+    # interpolated into nftables rules and /etc/hosts.
+    if [[ ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         return 1
     fi
     echo "${ip}"
 }
 
+# Wait until a hostname resolves (DNS may not be up yet early in boot).
+# Prints the IPv4 and returns 0, or returns 1 after the timeout.
+# Usage: resolve_ipv4_wait <host-or-ip> [timeout-seconds]
+resolve_ipv4_wait() {
+    local host="$1" timeout="${2:-60}" ip="" waited=0
+    while (( waited <= timeout )); do
+        if ip=$(resolve_ipv4 "${host}"); then
+            echo "${ip}"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    return 1
+}
+
+# Host part of LLM_API_BASE (empty when unset).
+llm_host_from_config() {
+    [[ -n "${LLM_API_BASE:-}" ]] || return 0
+    echo "${LLM_API_BASE}" | sed -E 's|https?://||; s|:[0-9]+.*||; s|/.*||'
+}
+
 # Add nftables rules for a VM
-# Usage: add_vm_nftables <slot> <tap-name> <gateway-ip>
+# Usage: add_vm_nftables <slot> <tap-name> <gateway-ip> [llm-ip-fallback]
+#
+# llm-ip-fallback is the LLM address recorded when the VM was launched (and
+# pinned into its /etc/hosts); it is used when the LLM host cannot be resolved
+# right now, so a DNS hiccup at boot cannot cut a restored VM off from its LLM.
 add_vm_nftables() {
     local slot="$1"
     local tap_name="$2"
     local gateway_ip="$3"
+    local llm_ip_fallback="${4:-}"
 
     local squid_http="${SQUID_HTTP_PORT:-3128}"
     local squid_https="${SQUID_HTTPS_PORT:-3129}"
@@ -119,6 +196,10 @@ add_vm_nftables() {
         # that would abort launch before the warn-and-skip branch below, so
         # tolerate it and let the empty-check handle failure.
         llm_ip=$(resolve_ipv4 "${llm_host}") || true
+        if [[ -z "${llm_ip}" && "${llm_ip_fallback}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "network.sh: WARNING: could not resolve LLM host '${llm_host}'; using the address recorded at launch (${llm_ip_fallback}) for vm${slot}" >&2
+            llm_ip="${llm_ip_fallback}"
+        fi
         if [[ -z "${llm_ip}" ]]; then
             echo "network.sh: WARNING: could not resolve LLM host '${llm_host}' to an IPv4 address; skipping LLM passthrough rule for vm${slot}" >&2
         else
@@ -144,12 +225,14 @@ remove_vm_nftables() {
     # Remove all rules with this VM's comment tag
     for chain in forward prerouting postrouting; do
         # List rules with handles, find ones matching our VM, delete them
+        # `|| true`: no matching rule is the normal case for a fresh slot, and
+        # grep's exit status must not abort a caller running under pipefail.
         nft -a list chain ip vm_filter "${chain}" 2>/dev/null | \
-            grep "vm${slot}-" | \
+            grep "\"vm${slot}-" | \
             grep -oP 'handle \K[0-9]+' | \
             while read -r handle; do
                 nft delete rule ip vm_filter "${chain}" handle "${handle}" 2>/dev/null || true
-            done
+            done || true
     done
 }
 

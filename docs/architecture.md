@@ -126,9 +126,14 @@ The `agent-sandbox.service` systemd unit runs on boot:
 2. Restores nftables base rules
 3. Starts Squid and dnsmasq
 4. Iterates over `state/vms/*/info.json`
-5. Recreates TAP devices and nftables rules for each saved VM
-6. Relaunches Firecracker with the saved rootfs
+5. Recreates TAP devices, nftables rules and the Squid ACL for each saved VM
+6. Relaunches Firecracker (jailed) with the saved rootfs
 7. Restarts websockify for noVNC
+8. Restarts mnemosyne and the gateway router if they were set up
+
+Steps 5-7 are `vm_restore` in `lib/vm.sh`, built from the same functions
+`vm/launch.sh` uses, so a restored VM is configured exactly like a launched one.
+On shutdown the unit runs `sandbox-ctl stop-all --keep-state`.
 
 ## Observability
 
