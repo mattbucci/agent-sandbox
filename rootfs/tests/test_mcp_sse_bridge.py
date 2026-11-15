@@ -129,8 +129,10 @@ class FakeStreamableServer:
     """Streamable-HTTP MCP: replies in the POST body, as JSON or an event stream."""
 
     def __init__(self):
-        seen = {"sessions": [], "auth": []}
+        seen = {"sessions": [], "auth": [], "methods": []}
         self.seen = seen
+        state = {"session": "sess-1"}
+        self.state = state
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -140,6 +142,12 @@ class FakeStreamableServer:
                 msg = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 seen["sessions"].append(self.headers.get("Mcp-Session-Id"))
                 seen["auth"].append(self.headers.get("Authorization"))
+                seen["methods"].append(msg["method"])
+                sent = self.headers.get("Mcp-Session-Id")
+                if msg["method"] != "initialize" and sent != state["session"]:
+                    self.send_response(404)              # unknown session
+                    self.end_headers()
+                    return
                 if "id" not in msg:                      # notification
                     self.send_response(202)
                     self.end_headers()
@@ -151,7 +159,7 @@ class FakeStreamableServer:
                 reply = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}})
                 self.send_response(200)
                 if msg["method"] == "initialize":
-                    self.send_header("Mcp-Session-Id", "sess-1")
+                    self.send_header("Mcp-Session-Id", state["session"])
                 if msg["method"] == "tools/list":        # plain JSON body
                     body = reply.encode()
                     self.send_header("Content-Type", "application/json")
@@ -197,6 +205,24 @@ class HttpBridgeTest(unittest.TestCase):
         self.assertEqual(self.server.seen["sessions"][0], None)
         self.assertEqual(set(self.server.seen["sessions"][1:]), {"sess-1"})
         self.assertEqual(set(self.server.seen["auth"]), {"Bearer t"})
+
+    def test_reconnects_when_the_server_forgot_the_session(self):
+        out = io.StringIO()
+        bridge = mcp_sse_bridge.HttpBridge(self.server.url, "Bearer t")
+        for m in ({"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                  {"jsonrpc": "2.0", "method": "notifications/initialized"}):
+            bridge.handle(json.dumps(m), out)
+        self.server.state["session"] = "sess-2"          # the server restarted
+        bridge.handle(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call"}), out)
+        replies = {json.loads(l)["id"]: json.loads(l) for l in out.getvalue().splitlines()}
+        # The call succeeded on a fresh session, and the replayed handshake's
+        # reply was not relayed a second time.
+        self.assertEqual(sorted(replies), [1, 2])
+        self.assertEqual(replies[2]["result"], {"echo": "tools/call"})
+        self.assertEqual(bridge.session_id, "sess-2")
+        self.assertEqual(self.server.seen["methods"],
+                         ["initialize", "notifications/initialized", "tools/call",
+                          "initialize", "notifications/initialized", "tools/call"])
 
     def test_failed_request_is_answered_with_an_error(self):
         _bridge, replies = self.run_bridge([{"jsonrpc": "2.0", "id": 9, "method": "boom"}])

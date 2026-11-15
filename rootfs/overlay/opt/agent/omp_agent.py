@@ -99,10 +99,12 @@ class OmpConfig:
         self.api_base = env.get("LLM_API_BASE", "http://localhost:4000/v1")
         self.api_key = env.get("LLM_API_KEY", "sk-default")
         self.model = env.get("LLM_MODEL", "default-model")
-        self.context_window = _env_int(env, "OMP_CONTEXT_WINDOW", 131072)
+        # Model limits: llm.context_window / llm.max_output_tokens from the
+        # sandbox config (LLM_*), or OMP_* to override for omp alone.
+        self.context_window = _env_int(env, "OMP_CONTEXT_WINDOW", _env_int(env, "LLM_CONTEXT_WINDOW", 131072))
         # Input + this must fit the model's real window; 8192 leaves room for
         # omp's prompt, the tool list and recalled memory even on a 32k model.
-        self.max_tokens = _env_int(env, "OMP_MAX_TOKENS", 8192)
+        self.max_tokens = _env_int(env, "OMP_MAX_TOKENS", _env_int(env, "LLM_MAX_OUTPUT_TOKENS", 8192))
         self.max_sessions = max(1, _env_int(env, "OMP_MAX_SESSIONS", 4))
         self.idle_timeout_s = _env_int(env, "OMP_IDLE_TIMEOUT_S", 1800)
         self.start_timeout_s = _env_int(env, "OMP_START_TIMEOUT_S", 120)

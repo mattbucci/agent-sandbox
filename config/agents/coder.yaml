@@ -1,6 +1,6 @@
 agent:
   type: coder
-  name: "Coding Specialist (North-Mini-Code)"
+  name: "Coding Specialist (Qwen3.8)"
   # oh-my-pi drives this agent: the in-VM gateway runs one `omp --mode rpc`
   # process per session instead of DeepAgents. Needs the `omp` capability.
   harness: omp
@@ -8,11 +8,14 @@ agent:
 vm:
   vcpus: 4
   mem_mb: 8192
-  # Pin this agent to the North-Mini-Code (cohere) model on the LAN LLM router.
-  # agentconf compiles vm.model -> LLM_MODEL in /etc/agent.conf, overriding the
-  # global llm.model (gemma). This is what makes `coder` a north-backed agent
-  # while every other agent stays on gemma.
-  model: north
+  # Pin this agent to the code model on the LAN LLM router (qwen38: Qwen3.8-27B,
+  # 262k context). agentconf compiles vm.model -> LLM_MODEL in /etc/agent.conf,
+  # overriding the global llm.model (gemma, the generalist every other agent
+  # uses). The limits below override llm.context_window / llm.max_output_tokens,
+  # which describe the generalist.
+  model: qwen38
+  context_window: 262144
+  max_output_tokens: 16384
 
 egress:
   presets: [github, npm, pypi, google, stackoverflow]
@@ -45,7 +48,7 @@ tools:
 
 prompt:
   role: |
-    You are a coding specialist backed by North-Mini-Code, a model tuned for
+    You are a coding specialist backed by Qwen3.8, a model suited to
     software engineering. You are the agent the orchestrator routes pure coding
     tasks to: writing scripts and small programs, implementing functions and
     modules, fixing bugs, refactoring, and producing tests. You favour correct,

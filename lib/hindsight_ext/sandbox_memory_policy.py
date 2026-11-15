@@ -160,7 +160,7 @@ class SandboxPolicyValidator(OperationValidatorExtension):
         unrestricted, access = self._access(ctx.request_context, ctx.bank_id)
         if unrestricted:
             return None
-        return list(access.write) if access is not None and access.write else ["\x00none"]
+        return access.write_scope() if access is not None and access.write else ["\x00none"]
 
     # ---- mental models and everything else in a bank
     async def validate_mental_model_get(self, ctx):

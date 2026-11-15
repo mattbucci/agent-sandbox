@@ -70,6 +70,16 @@ class BankAccessTest(unittest.TestCase):
         self.assertFalse(own.may_write_tags([]))                             # untagged = shared: admin-only
         self.assertTrue(self.access(write=["project:*"]).may_write_tags(["project:apollo"]))
         self.assertFalse(self.access().may_write_tags(["agent:coder"]))      # read-only
+
+    def test_label_tags_ride_along_but_grant_nothing(self):
+        own = self.access(write=["agent:hermes"])
+        # hermes-agent stamps each retain with its session.
+        self.assertTrue(own.may_write_tags(["agent:hermes", "session:api-1"]))
+        self.assertFalse(own.may_write_tags(["session:api-1"]))               # owned by nobody
+        self.assertFalse(own.may_write_tags(["agent:coder", "session:api-1"]))
+        self.assertFalse(self.access().may_write_tags(["agent:hermes", "session:api-1"]))
+        self.assertEqual(own.write_scope(), ["agent:hermes", "session:*"])
+        self.assertEqual(self.access().write_scope(), [])
         self.assertFalse(self.access().can_write)
 
     def test_principal_bank_lookup(self):

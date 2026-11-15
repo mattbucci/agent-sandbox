@@ -76,6 +76,6 @@ into the harness.**
   extensions and are not done here.
 - A new several-GB dependency on the host (PyTorch and local models), pinned by
   version with its resolution date frozen, and ~2 GB of RAM.
-- The real `hermes` container is not wired to Hindsight and runs without shared
-  memory under this backend.
+- The real `hermes` container is wired through hermes-agent's bundled Hindsight
+  provider (configured at launch) rather than through the in-VM gateway.
 - Agent images must be rebuilt to pick up the runtime that uses it.

@@ -70,4 +70,7 @@ per-agent policy compiled from the YAML.**
 - Identity is the token alone; it is not bound to the VM's address.
 - Agents launched before this change hold the master token and must be
   relaunched; the master should be rotated if it was ever exposed to an agent.
-- The `hermes` container is still not wired to memory.
+- The `hermes` container uses hermes-agent's own Hindsight provider with its
+  per-agent token. That provider tags each write with `session:<id>`, so the
+  policy treats `session:*` as a label: allowed beside a tag the agent may
+  write, never sufficient alone, and never part of a read scope.

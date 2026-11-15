@@ -817,15 +817,17 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
         f'HINDSIGHT_EXTRA_BANKS="{",".join(agent_extra_banks)}"',
     ]
 
-    # Model limits for harnesses that must be told them (omp advertises them to
-    # its own context management). llm.context_window / llm.max_output_tokens
-    # in sandbox.yaml, overridable per agent under vm:. Unset -> harness defaults.
+    # Model limits, for harnesses that have to be told them: omp advertises both
+    # to its own context management, and hermes requests max_output_tokens as
+    # its completion budget (unset, it asks for 65536, which a local model
+    # server rejects). llm.context_window / llm.max_output_tokens in
+    # sandbox.yaml, overridable per agent under vm:. Unset -> harness defaults.
     context_window = vm.get("context_window") or llm.get("context_window")
     max_output = vm.get("max_output_tokens") or llm.get("max_output_tokens")
     if context_window:
-        lines.append(f'OMP_CONTEXT_WINDOW="{int(context_window)}"')
+        lines.append(f'LLM_CONTEXT_WINDOW="{int(context_window)}"')
     if max_output:
-        lines.append(f'OMP_MAX_TOKENS="{int(max_output)}"')
+        lines.append(f'LLM_MAX_OUTPUT_TOKENS="{int(max_output)}"')
 
     # GitHub token injection — read from secrets file if it exists
     agent_type = agent_info.get("type", "generic")

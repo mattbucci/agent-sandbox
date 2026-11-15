@@ -99,8 +99,8 @@ HINDSIGHT_BANK="${HINDSIGHT_BANK:-agent-sandbox}"
 HINDSIGHT_EXTRA_BANKS="${HINDSIGHT_EXTRA_BANKS:-}"
 EOF
 # Optional model limits (only present when configured).
-[[ -n "${OMP_CONTEXT_WINDOW:-}" ]] && echo "OMP_CONTEXT_WINDOW=\"${OMP_CONTEXT_WINDOW}\"" >> "${MOUNT_POINT}/etc/agent.conf"
-[[ -n "${OMP_MAX_TOKENS:-}" ]] && echo "OMP_MAX_TOKENS=\"${OMP_MAX_TOKENS}\"" >> "${MOUNT_POINT}/etc/agent.conf"
+[[ -n "${LLM_CONTEXT_WINDOW:-}" ]] && echo "LLM_CONTEXT_WINDOW=\"${LLM_CONTEXT_WINDOW}\"" >> "${MOUNT_POINT}/etc/agent.conf"
+[[ -n "${LLM_MAX_OUTPUT_TOKENS:-}" ]] && echo "LLM_MAX_OUTPUT_TOKENS=\"${LLM_MAX_OUTPUT_TOKENS}\"" >> "${MOUNT_POINT}/etc/agent.conf"
 
 # OTel: the collector runs on the host; the VM reaches it at its gateway IP.
 # GATEWAY_IP is exported by launch.sh. Without this, agent.py's init_tracing()
@@ -142,16 +142,71 @@ model:
   api_key: ${LLM_API_KEY}
   context_length: ${HERMES_CONTEXT_LENGTH:-131072}
 EOF
+    # Completion budget. Without it hermes asks for 65536 output tokens and a
+    # local model server answers 400 ("max_completion_tokens is too large").
+    if [[ -n "${LLM_MAX_OUTPUT_TOKENS:-}" ]]; then
+        echo "  max_tokens: ${LLM_MAX_OUTPUT_TOKENS}" >> "${MOUNT_POINT}/opt/hermes/data/config.yaml"
+    fi
 
-    # Wire the shared mnemosyne agent-memory MCP server into the hermes config.
-    # Even with --network host the container gets its own /etc/hosts, so the
-    # mnemosyne.host name is also pinned via --add-host in run-hermes.sh. Only
-    # emit the mcp block when memory is enabled for this agent type.
-    if [[ "${HINDSIGHT_ENABLED:-0}" == "1" ]]; then
-        # The hermes container is its own agent runtime, so the in-VM memory
-        # hooks (gateway_server.py) do not apply to it, and its MCP client
-        # config for a streamable-HTTP server is not validated here yet.
-        echo "NOTE: memory.backend=hindsight is not wired into the hermes container; it runs without shared memory." >&2
+    # Shared memory for the hermes container.
+    #
+    # Hindsight: hermes-agent has its own Hindsight memory provider
+    # (plugins/memory/hindsight), so it is configured natively rather than
+    # through MCP: `memory.provider: hindsight` selects it, and
+    # $HERMES_HOME/hindsight/config.json points it at the sandbox's service in
+    # "local_external" mode. The provider then recalls before each turn, retains
+    # after it, and exposes hindsight_recall / _retain / _reflect tools — the same
+    # behaviour gateway_server.py gives the other harnesses. The key is this
+    # agent's own token; what it can reach is decided by the access policy.
+    #
+    # mnemosyne: an MCP server in config.yaml. Even with --network host the
+    # container gets its own /etc/hosts, so mnemosyne.host is also pinned via
+    # --add-host in run-hermes.sh.
+    if [[ "${HINDSIGHT_ENABLED:-0}" == "1" && ( -z "${HINDSIGHT_TOKEN:-}" || -z "${GATEWAY_IP:-}" ) ]]; then
+        echo "WARNING: HINDSIGHT_ENABLED=1 but the agent token or gateway IP is missing; hermes runs without shared memory." >&2
+    elif [[ "${HINDSIGHT_ENABLED:-0}" == "1" ]]; then
+        echo "Wiring the Hindsight memory provider into the hermes container..."
+        cat >> "${MOUNT_POINT}/opt/hermes/data/config.yaml" <<EOF
+memory:
+  provider: hindsight
+EOF
+        mkdir -p "${MOUNT_POINT}/opt/hermes/data/hindsight"
+        # Written with python so the values are JSON-escaped, and readable only
+        # by the container's user: the file holds the agent's token.
+        HS_CONF="${MOUNT_POINT}/opt/hermes/data/hindsight/config.json" \
+        HS_URL="http://${GATEWAY_IP}:${HINDSIGHT_PORT:-8890}" \
+        HS_TOKEN="${HINDSIGHT_TOKEN}" HS_BANK="${HINDSIGHT_BANK:-agent-sandbox}" HS_AGENT="${AGENT_TYPE}" \
+        python3 - <<'HSCONF'
+import json, os
+conf = {
+    "mode": "local_external",
+    "api_url": os.environ["HS_URL"],
+    "api_key": os.environ["HS_TOKEN"],
+    "bank_id": os.environ["HS_BANK"],
+    # Recall and tools injected by the provider; retention in the background.
+    "memory_mode": "hybrid",
+    "auto_recall": True,
+    "auto_retain": True,
+    "retain_async": True,
+    "recall_budget": "low",
+    "recall_max_tokens": 1024,
+    # All three layers below the mental models, not only observations (the
+    # provider's default): facts are useful before they have been consolidated.
+    "recall_types": "observation,world,experience",
+    "retain_tags": ["agent:" + os.environ["HS_AGENT"]],
+    "retain_context": "conversation with the " + os.environ["HS_AGENT"] + " agent",
+}
+path = os.environ["HS_CONF"]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(conf, f, indent=2)
+    f.write("\n")
+HSCONF
+        # The container's entrypoint drops to its `hermes` user (uid 10000 unless
+        # remapped) and only chowns the top level of the data dir, so a root-owned
+        # 0600 file here is unreadable to the provider and it stays inactive.
+        chown -R "${HERMES_CONTAINER_UID:-10000}:${HERMES_CONTAINER_GID:-${HERMES_CONTAINER_UID:-10000}}" \
+            "${MOUNT_POINT}/opt/hermes/data/hindsight"
     elif [[ "${MNEMOSYNE_ENABLED:-0}" == "1" && -z "${MNEMOSYNE_TOKEN:-}" ]]; then
         echo "WARNING: MNEMOSYNE_ENABLED=1 but MNEMOSYNE_TOKEN is empty; skipping mcp block (would 401)." >&2
     elif [[ "${MNEMOSYNE_ENABLED:-0}" == "1" ]]; then

@@ -62,6 +62,17 @@ def agent_token(master_token: str, agent_type: str) -> str:
     return f"hsa_{mac.hexdigest()[:48]}"
 
 
+# Bookkeeping tags a client attaches beside the tag that says whose memory it
+# is (hermes-agent's Hindsight provider stamps every retain with the session).
+# They decide nothing about access: a label never makes an item writable, and
+# no read scope names one.
+LABEL_TAG_PATTERNS = ("session:*",)
+
+
+def is_label_tag(tag):
+    return any(fnmatch.fnmatchcase(str(tag), pat) for pat in LABEL_TAG_PATTERNS)
+
+
 class BankAccess:
     """What one principal may do in one bank."""
 
@@ -99,11 +110,22 @@ class BankAccess:
         return {"tags": ["\x00none"], "match": "any_strict"}
 
     def may_write_tags(self, tags):
-        """True when every tag is covered by a write pattern (and there is one)."""
+        """True when the tags name memory this principal may write.
+
+        Every ownership tag must be covered by a write pattern, and there must
+        be at least one: an item carrying only label tags would be owned by
+        nobody, which is as good as shared.
+        """
         tags = [str(t) for t in tags or []]
-        if not self.write or not tags:
+        owning = [t for t in tags if not is_label_tag(t)]
+        if not self.write or not owning:
             return False  # untagged belongs to everyone: agents never write it
-        return all(any(fnmatch.fnmatchcase(t, pat) for pat in self.write) for t in tags)
+        return all(any(fnmatch.fnmatchcase(t, pat) for pat in self.write) for t in owning)
+
+    def write_scope(self):
+        """Patterns handed to Hindsight's own write check: the write patterns
+        plus the label tags a client may attach beside them."""
+        return list(self.write) + list(LABEL_TAG_PATTERNS) if self.write else []
 
 
 class Principal:

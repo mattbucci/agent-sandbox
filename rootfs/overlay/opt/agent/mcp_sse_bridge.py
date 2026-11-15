@@ -26,6 +26,7 @@ import os
 import sys
 import threading
 import urllib.parse
+import urllib.error
 import urllib.request
 
 CONNECT_TIMEOUT_S = 20
@@ -130,8 +131,11 @@ class HttpBridge:
         self.url = url
         self.headers = {"Authorization": authorization} if authorization else {}
         self.session_id = None
+        self._initialize = None    # the client's handshake, kept to replay
+        self._initialized = None
         self._out_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._resume_lock = threading.Lock()
 
     def _emit(self, out, text):
         with self._out_lock:
@@ -145,37 +149,79 @@ class HttpBridge:
                 "jsonrpc": "2.0", "id": message["id"],
                 "error": {"code": -32000, "message": f"mcp bridge: {reason}"}}))
 
-    def handle(self, line, out):
-        message = json.loads(line)
+    def _post(self, line, out, session_id):
+        """POST one message and relay the reply. out=None discards it."""
         headers = {**self.headers, "Content-Type": "application/json",
                    "Accept": "application/json, text/event-stream"}
-        with self._state_lock:
-            if self.session_id:
-                headers["Mcp-Session-Id"] = self.session_id
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
         req = urllib.request.Request(self.url, data=line.encode("utf-8"), method="POST", headers=headers)
+        emit = (lambda text: self._emit(out, text)) if out is not None else (lambda text: None)
+        with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT_S) as resp:
+            sid = resp.headers.get("Mcp-Session-Id")
+            if sid:
+                with self._state_lock:
+                    self.session_id = sid
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" in ctype:
+                data = []
+                for raw in resp:
+                    text = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    if text == "":
+                        if data:
+                            emit("\n".join(data))
+                        data = []
+                    elif text.startswith("data:"):
+                        data.append(text[5:].lstrip(" "))
+                if data:
+                    emit("\n".join(data))
+            else:
+                body = resp.read().decode("utf-8", "replace").strip()
+                if body:  # notifications are answered 202 with no body
+                    emit(body)
+
+    def _resume(self, stale):
+        """Open a new session after the server forgot ours (it restarted).
+
+        Replays the client's own handshake; the client already has its answer,
+        so the replies are dropped. Several requests can fail at once: only the
+        first one to get here reconnects.
+        """
+        with self._resume_lock:
+            with self._state_lock:
+                if self.session_id != stale:
+                    return True  # another request already reconnected
+                self.session_id = None
+            if not self._initialize:
+                return False
+            log("session expired on the server; starting a new one")
+            self._post(self._initialize, None, None)
+            if self._initialized:
+                with self._state_lock:
+                    sid = self.session_id
+                self._post(self._initialized, None, sid)
+            return True
+
+    def handle(self, line, out):
+        message = json.loads(line)
+        method = message.get("method") if isinstance(message, dict) else None
+        if method == "initialize":
+            self._initialize = line
+        elif method == "notifications/initialized":
+            self._initialized = line
+        with self._state_lock:
+            sid = self.session_id
         try:
-            with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT_S) as resp:
-                sid = resp.headers.get("Mcp-Session-Id")
-                if sid:
-                    with self._state_lock:
-                        self.session_id = sid
-                ctype = (resp.headers.get("Content-Type") or "").lower()
-                if "text/event-stream" in ctype:
-                    data = []
-                    for raw in resp:
-                        text = raw.decode("utf-8", "replace").rstrip("\r\n")
-                        if text == "":
-                            if data:
-                                self._emit(out, "\n".join(data))
-                            data = []
-                        elif text.startswith("data:"):
-                            data.append(text[5:].lstrip(" "))
-                    if data:
-                        self._emit(out, "\n".join(data))
-                else:
-                    body = resp.read().decode("utf-8", "replace").strip()
-                    if body:  # notifications are answered 202 with no body
-                        self._emit(out, body)
+            try:
+                self._post(line, out, sid)
+            except urllib.error.HTTPError as e:
+                # 404 for a request that named a session means the session is
+                # gone (MCP streamable HTTP): reconnect and send it again.
+                if e.code != 404 or not sid or method == "initialize" or not self._resume(sid):
+                    raise
+                with self._state_lock:
+                    sid = self.session_id
+                self._post(line, out, sid)
         except Exception as e:  # noqa: BLE001
             log(f"request failed: {e}")
             self._error(out, message, str(e))

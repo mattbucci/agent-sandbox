@@ -108,11 +108,11 @@ class AgentConfTest(unittest.TestCase):
         self.assertEqual(self.conf(GLOBAL, agent)["HINDSIGHT_EXTRA_BANKS"], '"research"')
 
     def test_model_limits_only_when_configured(self):
-        self.assertNotIn("OMP_MAX_TOKENS", self.conf(GLOBAL, AGENTS["coder"]))
+        self.assertNotIn("LLM_MAX_OUTPUT_TOKENS", self.conf(GLOBAL, AGENTS["coder"]))
         g = {**GLOBAL, "llm": {"model": "q", "context_window": 32768, "max_output_tokens": 8192}}
         agent = {"agent": {"type": "x", "name": "X"}, "vm": {"max_output_tokens": 4096}}
         conf = self.conf(g, agent)
-        self.assertEqual((conf["OMP_CONTEXT_WINDOW"], conf["OMP_MAX_TOKENS"]), ('"32768"', '"4096"'))
+        self.assertEqual((conf["LLM_CONTEXT_WINDOW"], conf["LLM_MAX_OUTPUT_TOKENS"]), ('"32768"', '"4096"'))
 
 
 class AccessPolicyTest(unittest.TestCase):

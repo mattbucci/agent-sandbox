@@ -41,9 +41,17 @@ Agents can also use memory deliberately:
 |---|---|
 | `deepagents` | `memory_recall`, `memory_retain`, `memory_reflect` |
 | `omp` | `mcp__memory_recall`, `mcp__memory_retain`, `mcp__memory_reflect`, plus read-only mental-model and knowledge-page tools |
-| `hermes` | not wired — the container runs without shared memory |
+| `hermes` | hermes-agent's own Hindsight provider: `hindsight_recall`, `hindsight_retain`, `hindsight_reflect`, plus its recall before and retain after each turn |
 
 The tools act on the agent's primary bank, within its access.
+
+The `hermes` container is configured natively rather than through the in-VM
+gateway: at launch `vm/prepare-rootfs.sh` sets `memory.provider: hindsight` in
+its `config.yaml` and writes `hindsight/config.json` in its data directory with
+the service URL, the bank, and the agent's own token. Its provider stamps each
+write with a `session:<id>` tag beside `agent:hermes`; the access policy lets
+such label tags ride along with a tag the agent owns, and they grant nothing on
+their own.
 
 `reflect` asks Hindsight to reason over the whole hierarchy and can take minutes.
 
