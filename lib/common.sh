@@ -130,6 +130,13 @@ ensure_global_compiled() {
     fi
 }
 
+# pid_alive <pid> — is the process running? Unlike `kill -0`, this also works
+# for a non-root caller looking at another user's process (jailed VMs run as
+# per-VM fc-N users), so `sandbox-ctl status` is right without sudo.
+pid_alive() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && [[ -d "/proc/$1" ]]
+}
+
 # --- VM listing ---
 list_running_vms() {
     if [[ ! -d "${STATE_DIR}/vms" ]]; then
@@ -139,7 +146,7 @@ list_running_vms() {
         [[ -f "${info}" ]] || continue
         local pid
         pid=$(jq -r '.firecracker_pid' "${info}" 2>/dev/null)
-        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+        if pid_alive "${pid}"; then
             echo "${info}"
         fi
     done

@@ -53,6 +53,17 @@ if [[ "${HARNESS}" == "hermes" ]]; then
     exec /opt/agent/run-hermes.sh
 fi
 
+# The omp harness is served by the same gateway_server.py as deepagents (it
+# swaps the agent behind it), so it continues below — but it cannot work
+# without the binary, so say so here rather than on the first request.
+if [[ "${HARNESS}" == "omp" ]]; then
+    if ! command -v omp >/dev/null 2>&1; then
+        log "ERROR: HARNESS=omp but 'omp' is not installed. Add the 'omp' capability preset to this agent and rebuild its rootfs."
+        exit 1
+    fi
+    log "omp harness: $(omp --version 2>/dev/null || echo unknown)"
+fi
+
 # Ensure workspace exists
 mkdir -p /home/agent/workspace /home/agent/tasks
 cd /home/agent/workspace

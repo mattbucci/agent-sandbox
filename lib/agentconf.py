@@ -33,6 +33,11 @@ PRESETS_DIR = CONFIG_DIR / "presets"
 AGENTS_DIR = CONFIG_DIR / "agents"
 INSTALL_SCRIPTS_DIR = CONFIG_DIR / "install-scripts"
 BUILD_DIR = SANDBOX_ROOT / "build"
+# In-VM backends (dispatched by rootfs/overlay/opt/agent/start.sh) and the
+# capability preset each one needs baked into the image.
+HARNESSES = ("deepagents", "omp", "hermes")
+HARNESS_CAPABILITY = {"omp": "omp", "hermes": "docker"}
+
 VERSIONS_ENV = CONFIG_DIR / "versions.env"
 VERSIONS_LIB = SANDBOX_ROOT / "lib" / "versions.sh"
 
@@ -288,6 +293,7 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
 
     # Harness selects the in-VM backend runner (see start.sh):
     #   "deepagents" (default) -> gateway_server.py / agent.py
+    #   "omp"                  -> gateway_server.py / omp_agent.py (oh-my-pi)
     #   "hermes"               -> run-hermes.sh (pre-baked hermes container)
     harness = agent_info.get("harness", "deepagents")
 
@@ -511,6 +517,14 @@ def cmd_validate(agent_type: str):
         errors.append("Missing agent.type")
     if "agent" not in agent or "name" not in agent.get("agent", {}):
         errors.append("Missing agent.name")
+
+    # Validate the harness and what it needs in the image
+    harness = agent.get("agent", {}).get("harness", "deepagents")
+    if harness not in HARNESSES:
+        errors.append(f"Unknown agent.harness '{harness}' (expected one of: {', '.join(HARNESSES)})")
+    needs = HARNESS_CAPABILITY.get(harness)
+    if needs and needs not in agent.get("capabilities", {}).get("presets", []):
+        errors.append(f"agent.harness '{harness}' requires the '{needs}' capability preset")
 
     # Validate egress presets
     for p in agent.get("egress", {}).get("presets", []):

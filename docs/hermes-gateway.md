@@ -47,7 +47,8 @@ Go router plus hand-rolled agents; we are **not** running the literal
 
 Because the contract lives at the `:8642` boundary, backends are swappable:
 
-- The shipped in-VM adapter is a hand-rolled Python harness (`deepagents`).
+- The shipped in-VM adapter is a hand-rolled Python server with two harnesses
+  behind it: `deepagents` (default) and `omp` (oh-my-pi).
 - Any other harness may replace it, as long as it honors the **same wire contract**
   on `:8642` (the endpoints, SSE chunk shape, and per-session history described
   below).
@@ -103,10 +104,54 @@ The mechanism that lets one `start.sh` run different backends is the per-agent
 | `HARNESS` | Behavior |
 |-----------|----------|
 | `deepagents` (default) | existing flow — `GATEWAY_ENABLED` runs `/opt/agent/gateway_server.py`, else `agent.py` |
+| `omp` | same `/opt/agent/gateway_server.py`, driving [oh-my-pi](https://github.com/can1357/oh-my-pi) through `/opt/agent/omp_agent.py` — see [omp harness](#omp-harness-oh-my-pi) |
 | `hermes` | runs the pre-baked container via `/opt/agent/run-hermes.sh` |
 
 All other agent types keep working unchanged because `HARNESS` defaults to
-`deepagents`.
+`deepagents`. `sandbox-ctl config validate` rejects an unknown harness, and one
+whose required capability preset (`omp` → `omp`, `hermes` → `docker`) is missing.
+
+## omp harness (oh-my-pi)
+
+`agent.harness: omp` puts the [oh-my-pi](https://github.com/can1357/oh-my-pi)
+coding agent (`omp`) behind the same in-VM server, so the wire contract — chat
+completions, SSE streaming, sessions, the task API and the runs/approval API — is
+identical to a `deepagents` agent. The shipped `coder` agent uses it.
+
+```yaml
+# config/agents/<type>.yaml
+agent:
+  type: coder
+  harness: omp
+capabilities:
+  presets: [omp, ...]     # installs the pinned omp binary (config/versions.env)
+```
+
+```bash
+sudo bin/sandbox-ctl build-agent coder     # bakes omp + the current runtime overlay
+sudo bin/sandbox-ctl launch coder
+```
+
+How it maps (`rootfs/overlay/opt/agent/omp_agent.py`):
+
+| Concern | Behavior |
+|---------|----------|
+| Process model | One `omp --mode rpc` process per `X-Hermes-Session-Id`, driven over its JSONL stdio protocol. At most `OMP_MAX_SESSIONS` (default 4) live at once; idle ones are closed after `OMP_IDLE_TIMEOUT_S` (default 1800). |
+| Conversation | omp keeps its own history, so only the newest user message is sent each turn. Each session has its own `--session-dir` and starts with `--continue`: an evicted or crashed process resumes the same conversation from disk (`~/.omp/gateway-sessions/`). |
+| Model | A single custom provider (`sandbox`) pointing at `LLM_API_BASE`, model `LLM_MODEL`, written to `~/.omp/agent/models.yml` at start. `OMP_CONTEXT_WINDOW` (default 131072) and `OMP_MAX_TOKENS` set the advertised limits. |
+| System prompt | omp's own coding prompt, with the agent's compiled `/etc/agent/system-prompt.md` appended. |
+| Approvals | omp runs with `--approval-mode write`, so every exec-tier tool call asks first and the adapter answers. Outside a run it approves (the VM is the sandbox). Inside a run, a shell command matching the dangerous-command patterns is put to the client through the runs API — the same policy as the `deepagents` harness. |
+| Memory | With `memory.enabled`, the shared mnemosyne server is configured as an MCP server reached through `/opt/agent/mcp_sse_bridge.py` (stdio ⇄ SSE), and omp waits for its tools at startup. Tools appear as `mcp__mnemosyne_*`. |
+| Tracing | omp exports OTLP itself from `OTEL_EXPORTER_OTLP_ENDPOINT` (set by `start.sh`). |
+| Failures | Provider retries are capped (`OMP_MAX_RETRIES`, default 2) so a dead backend surfaces as an error instead of holding the agent's slot through omp's default multi-minute backoff. A cancelled run or stream aborts the turn in omp and keeps the process. |
+
+The bridge exists because omp's built-in SSE client is reset mid-handshake when
+it talks to mnemosyne from inside a VM, while plain HTTP clients on the same path
+complete it; stdio avoids that client entirely.
+
+`build-agent` re-syncs `rootfs/overlay/opt/agent` and `agent-init` into the image,
+so a change to the in-VM server or a harness adapter needs only `build-agent <type>`
+and a relaunch, not a base rebuild.
 
 ### Configuration
 

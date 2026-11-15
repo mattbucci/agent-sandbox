@@ -301,6 +301,20 @@ tools:
 | `build-essential`, `strace`, `gdb` | Development tools |
 | `vim`, `nano`, `ssh` | System tools |
 
+## Harness
+
+`agent.harness` selects what runs the agent inside the VM:
+
+| Harness | Runs | Needs |
+|---------|------|-------|
+| `deepagents` (default) | LangGraph DeepAgents | nothing extra |
+| `omp` | [oh-my-pi](https://github.com/can1357/oh-my-pi) coding agent | the `omp` capability preset |
+| `hermes` | the real hermes-agent container | the `docker` capability preset + a pre-baked image |
+
+All three serve the same API to the gateway. See
+[Harness selection](hermes-gateway.md#harness-selection) and the
+[omp harness](hermes-gateway.md#omp-harness-oh-my-pi).
+
 ## Install Scripts
 
 Complex tool installations live in `config/install-scripts/`:
@@ -314,6 +328,7 @@ config/install-scripts/
   trivy.sh          # pinned release tarball (sha256 verified)
   grype.sh          # pinned release tarball (sha256 verified)
   sentry-cli.sh     # pinned release binary (sha256 verified)
+  omp.sh            # pinned oh-my-pi binary (sha256 verified)
   semgrep.sh        # pip install
 ```
 

@@ -173,6 +173,16 @@ cmd_build_agent() {
     mount -t sysfs sysfs  "${mount_point}/sys"
     mount -t tmpfs tmpfs  "${mount_point}/tmp"
 
+    # Refresh the agent runtime from the overlay. The base image carries a copy
+    # from when it was built; re-syncing here means a change to the in-VM
+    # gateway server, a harness adapter or agent-init only needs `build-agent`,
+    # not a full base rebuild. The venv (/opt/agent/.venv) is left untouched.
+    log_info "Syncing agent runtime overlay into ${agent_type} rootfs..."
+    cp -a "${SANDBOX_ROOT}/rootfs/overlay/sbin/agent-init" "${mount_point}/sbin/agent-init"
+    chmod 755 "${mount_point}/sbin/agent-init"
+    cp -a "${SANDBOX_ROOT}/rootfs/overlay/opt/agent/." "${mount_point}/opt/agent/"
+    chmod 755 "${mount_point}/opt/agent/start.sh" "${mount_point}/opt/agent/run-hermes.sh"
+
     # Run compiled customize.sh (from YAML presets)
     if [[ -f "${build_dir}/customize.sh" ]]; then
         log_info "Running customization for ${agent_type}..."
@@ -270,7 +280,7 @@ cmd_stop_all() {
         local pid
         pid=$(jq -r '.firecracker_pid' "${info}")
 
-        if kill -0 "${pid}" 2>/dev/null; then
+        if pid_alive "${pid}"; then
             # One VM failing to stop must not leave the rest running.
             if KEEP_VM_STATE="${keep_state}" "${SANDBOX_ROOT}/vm/stop.sh" "${instance_id}"; then
                 count=$((count + 1))
@@ -328,7 +338,7 @@ cmd_status() {
         started_at=$(jq -r '.started_at' "${info}")
 
         local status="STOPPED"
-        if kill -0 "${pid}" 2>/dev/null; then
+        if pid_alive "${pid}"; then
             status="RUNNING"
         fi
 
@@ -486,7 +496,7 @@ cmd_cleanup() {
         local pid
         pid=$(jq -r '.firecracker_pid' "${info}" 2>/dev/null)
 
-        if ! kill -0 "${pid}" 2>/dev/null; then
+        if ! pid_alive "${pid}"; then
             local instance_id
             instance_id=$(jq -r '.instance_id' "${info}")
             log_info "Cleaning up stopped VM: ${instance_id}"
@@ -567,7 +577,7 @@ cmd_gateway() {
             if [[ -f "${gw_pidfile}" ]]; then
                 local existing_pid
                 existing_pid=$(cat "${gw_pidfile}" 2>/dev/null)
-                if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+                if pid_alive "${existing_pid}"; then
                     log_warn "Gateway router already running (PID ${existing_pid})."
                     return 0
                 fi
@@ -602,7 +612,7 @@ cmd_gateway() {
 
             local gw_pid
             gw_pid=$(cat "${gw_pidfile}" 2>/dev/null)
-            if [[ -n "${gw_pid}" ]] && kill -0 "${gw_pid}" 2>/dev/null; then
+            if pid_alive "${gw_pid}"; then
                 kill "${gw_pid}" 2>/dev/null || true
                 log_ok "Stopped gateway router (PID ${gw_pid})."
             else
@@ -658,7 +668,7 @@ cmd_gateway() {
             if [[ -f "${gw_pidfile}" ]]; then
                 local gw_pid
                 gw_pid=$(cat "${gw_pidfile}" 2>/dev/null)
-                if [[ -n "${gw_pid}" ]] && kill -0 "${gw_pid}" 2>/dev/null; then
+                if pid_alive "${gw_pid}"; then
                     router_status="RUNNING (PID ${gw_pid})"
                 fi
             fi
@@ -843,7 +853,7 @@ cmd_mnemosyne() {
             if [[ -f "${pidfile}" ]]; then
                 local existing_pid
                 existing_pid=$(cat "${pidfile}" 2>/dev/null)
-                if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+                if pid_alive "${existing_pid}"; then
                     log_warn "mnemosyne already running (PID ${existing_pid})."
                     return 0
                 fi
@@ -882,7 +892,7 @@ cmd_mnemosyne() {
             else
                 local mnem_pid
                 mnem_pid=$(cat "${pidfile}" 2>/dev/null)
-                if [[ -n "${mnem_pid}" ]] && kill -0 "${mnem_pid}" 2>/dev/null; then
+                if pid_alive "${mnem_pid}"; then
                     kill "${mnem_pid}" 2>/dev/null || true
                     log_ok "Stopped mnemosyne (PID ${mnem_pid})."
                 else
@@ -900,7 +910,7 @@ cmd_mnemosyne() {
             local mnem_status="STOPPED" mnem_pid=""
             if [[ -f "${pidfile}" ]]; then
                 mnem_pid=$(cat "${pidfile}" 2>/dev/null)
-                if [[ -n "${mnem_pid}" ]] && kill -0 "${mnem_pid}" 2>/dev/null; then
+                if pid_alive "${mnem_pid}"; then
                     mnem_status="RUNNING (PID ${mnem_pid})"
                 fi
             fi
@@ -966,6 +976,7 @@ helm (guest)|HELM_VERSION||helm/helm
 trivy (guest)|TRIVY_VERSION||aquasecurity/trivy
 grype (guest)|GRYPE_VERSION||anchore/grype
 sentry-cli (guest)|SENTRY_CLI_VERSION||getsentry/sentry-cli
+omp (guest)|OMP_VERSION||can1357/oh-my-pi
 kubernetes apt (guest)|KUBERNETES_APT_SERIES||kubernetes/kubernetes
 mnemosyne|MNEMOSYNE_VERSION||
 hermes-agent|HERMES_AGENT_VERSION||NousResearch/hermes-agent
@@ -985,6 +996,7 @@ HELM_SHA256|https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz
 TRIVY_SHA256|https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
 GRYPE_SHA256|https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz
 SENTRY_CLI_SHA256|https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/sentry-cli-Linux-x86_64
+OMP_SHA256|https://github.com/can1357/oh-my-pi/releases/download/${OMP_VERSION}/omp-linux-x64
 ARTIFACTS
 }
 
