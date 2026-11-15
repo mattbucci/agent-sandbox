@@ -15,7 +15,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KVER="${KVER:-6.1.128}"
+SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SANDBOX_ROOT}/lib/versions.sh"
+
+# Pinned in config/versions.env. Overriding KVER builds an unpinned kernel, so
+# the tarball checksum is only enforced for the pinned version.
+KVER="${KVER:-${KERNEL_SRC_VERSION}}"
+KSHA=""
+[[ "${KVER}" == "${KERNEL_SRC_VERSION}" ]] && KSHA="${KERNEL_SRC_SHA256}"
 BUILD_DIR="${BUILD_DIR:-/tmp/kbuild}"
 SRC="${BUILD_DIR}/linux-${KVER}"
 TARBALL="${BUILD_DIR}/linux-${KVER}.tar.xz"
@@ -26,7 +33,14 @@ OUT="${SCRIPT_DIR}/vmlinux"
 mkdir -p "${BUILD_DIR}"
 
 # 1. Source
-[[ -f "${TARBALL}" ]] || curl -fSL -o "${TARBALL}" "${URL}"
+if [[ ! -f "${TARBALL}" ]]; then
+    if [[ -n "${KSHA}" ]]; then
+        fetch_verified "${URL}" "${KSHA}" "${TARBALL}"
+    else
+        echo "WARNING: KVER=${KVER} is not the pinned ${KERNEL_SRC_VERSION}; tarball is not checksum-verified."
+        curl -fSL -o "${TARBALL}" "${URL}"
+    fi
+fi
 [[ -d "${SRC}" ]]     || tar -C "${BUILD_DIR}" -xf "${TARBALL}"
 
 # 2. Base config from the current kernel's embedded IKCONFIG

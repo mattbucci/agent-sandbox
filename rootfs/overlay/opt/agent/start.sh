@@ -65,8 +65,9 @@ PYTHON="${VENV}/bin/python"
 # Install Python dependencies if venv doesn't exist
 if [[ ! -f "${PYTHON}" ]]; then
     log "Creating agent venv with uv..."
-    uv venv --python python3.12 "${VENV}" 2>&1 | tee -a "${LOG}"
-    uv pip install --python "${PYTHON}" -r "${AGENT_DIR}/requirements.txt" 2>&1 | tee -a "${LOG}"
+    # Same hash-pinned lock the image build uses (see rootfs/build-base.sh).
+    uv venv "${VENV}" 2>&1 | tee -a "${LOG}"
+    uv pip install --python "${PYTHON}" --require-hashes -r "${AGENT_DIR}/requirements.lock" 2>&1 | tee -a "${LOG}"
 fi
 
 # Run the agent

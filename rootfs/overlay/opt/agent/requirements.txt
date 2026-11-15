@@ -1,20 +1,28 @@
+# Direct dependencies of the in-VM agent runtime. This is the file you edit.
+#
+# The image is built from requirements.lock (every transitive dependency pinned
+# with sha256 hashes), never from this file directly. After changing anything
+# here, regenerate the lock:
+#
+#     bin/sandbox-ctl deps lock
+#
 # DeepAgents - LangGraph-based agent framework
-deepagents>=0.1.0
-langchain>=1.2.15,<2.0.0
-langchain-core>=1.2.27,<2.0.0
-langchain-openai>=0.3.0,<1.0.0
-langgraph>=1.0.0
+deepagents>=0.7,<1.0
+langchain>=1.4,<2.0
+langchain-core>=1.7,<2.0
+langchain-openai>=1.7,<2.0
+langgraph>=1.2,<2.0
 
 # MCP client adapters (mnemosyne shared agent-memory over SSE)
-langchain-mcp-adapters>=0.1.0
+langchain-mcp-adapters>=0.3,<1.0
 
 # OpenTelemetry tracing
-opentelemetry-api>=1.20.0
-opentelemetry-sdk>=1.20.0
-opentelemetry-exporter-otlp>=1.20.0
-opentelemetry-instrumentation-requests>=0.41b0
-opentelemetry-instrumentation-httpx>=0.41b0
+opentelemetry-api>=1.45
+opentelemetry-sdk>=1.45
+opentelemetry-exporter-otlp>=1.45
+opentelemetry-instrumentation-requests>=0.66b0
+opentelemetry-instrumentation-httpx>=0.66b0
 
 # Utilities
-requests>=2.32.0
-beautifulsoup4>=4.12.0
+requests>=2.34
+beautifulsoup4>=4.15

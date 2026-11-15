@@ -33,6 +33,28 @@ PRESETS_DIR = CONFIG_DIR / "presets"
 AGENTS_DIR = CONFIG_DIR / "agents"
 INSTALL_SCRIPTS_DIR = CONFIG_DIR / "install-scripts"
 BUILD_DIR = SANDBOX_ROOT / "build"
+VERSIONS_ENV = CONFIG_DIR / "versions.env"
+VERSIONS_LIB = SANDBOX_ROOT / "lib" / "versions.sh"
+
+
+def customize_prelude() -> list:
+    """Pinned versions + the verified-download helper for the chroot.
+
+    customize.sh runs inside the rootfs chroot, where the checkout is not
+    visible, so the KEY="value" pins from config/versions.env and
+    fetch_verified/pinned_sha from lib/versions.sh are inlined verbatim.
+    """
+    lines = ["# --- Pinned versions (config/versions.env) ---"]
+    for raw in VERSIONS_ENV.read_text().splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    lines.append("")
+    lines.append("# --- Verified download helpers (lib/versions.sh) ---")
+    helpers = VERSIONS_LIB.read_text()
+    lines.append(helpers[helpers.index("# fetch_verified <url>"):].rstrip())
+    lines.append("")
+    return lines
 
 
 def load_yaml(path: Path) -> dict:
@@ -127,6 +149,7 @@ def compile_customize_sh(agent: dict) -> str:
         "export DEBIAN_FRONTEND=noninteractive",
         "",
     ]
+    lines += customize_prelude()
 
     if apt_packages:
         lines.append("echo 'Installing apt packages...'")
@@ -153,8 +176,14 @@ def compile_customize_sh(agent: dict) -> str:
     for script_name in install_scripts:
         script_path = INSTALL_SCRIPTS_DIR / script_name
         if script_path.exists():
+            # Each script runs in its own subshell: they are written as
+            # standalone programs (own `set -e`, `exit 0` when the tool is
+            # already present), and an inlined `exit` must not end the whole
+            # customize.sh and silently skip the scripts after it.
             lines.append(f"echo 'Running install script: {script_name}...'")
-            lines.append(script_path.read_text())
+            lines.append("(")
+            lines.append(script_path.read_text().rstrip())
+            lines.append(")")
             lines.append("")
         else:
             lines.append(f"echo 'WARNING: Install script not found: {script_name}'")

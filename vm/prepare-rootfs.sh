@@ -18,6 +18,7 @@ SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 source "${SANDBOX_ROOT}/lib/common.sh"
 source "${SANDBOX_ROOT}/lib/network.sh"   # resolve_ipv4
+source "${SANDBOX_ROOT}/lib/versions.sh"  # HERMES_AGENT_VERSION
 ensure_global_compiled
 
 AGENT_TYPE="${1:?Usage: prepare-rootfs.sh <agent-type> <instance-id> <vm-state-dir>}"
@@ -87,6 +88,7 @@ GATEWAY_ENABLED="${GATEWAY_ENABLED:-1}"
 GATEWAY_PORT="${GATEWAY_PORT:-8642}"
 API_SERVER_KEY="${API_SERVER_KEY:-}"
 HARNESS="${HARNESS:-deepagents}"
+HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION}"
 MNEMOSYNE_ENABLED="${MNEMOSYNE_ENABLED:-0}"
 MNEMOSYNE_PORT="${MNEMOSYNE_PORT:-8077}"
 MNEMOSYNE_TOKEN="${MNEMOSYNE_TOKEN:-}"

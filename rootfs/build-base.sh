@@ -6,7 +6,7 @@
 #   - Ubuntu 22.04 (Jammy) minimal + XFCE desktop
 #   - Chromium browser
 #   - x11vnc + Xvfb for remote desktop
-#   - Python 3, Node.js 22, build tools
+#   - Python 3.12, Node.js LTS, build tools (versions: config/versions.env)
 #   - DeepAgents runtime pre-installed
 #   - Custom init system (agent-init, replaces systemd)
 #
@@ -20,12 +20,13 @@ SANDBOX_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Load config
 source "${SANDBOX_ROOT}/lib/common.sh"
 ensure_global_compiled
+source "${SANDBOX_ROOT}/lib/versions.sh"   # pinned versions + fetch_verified
 
 ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-8192}"
 ROOTFS_IMG="${SANDBOX_ROOT}/rootfs/base.ext4"
 STAGING="${SANDBOX_ROOT}/rootfs/staging"
 OVERLAY="${SANDBOX_ROOT}/rootfs/overlay"
-UBUNTU_RELEASE="jammy"
+UBUNTU_RELEASE="${UBUNTU_RELEASE:-jammy}"   # pinned in config/versions.env
 UBUNTU_MIRROR="http://archive.ubuntu.com/ubuntu"
 
 # --- Preflight checks ---
@@ -104,7 +105,23 @@ chroot "${STAGING}" update-locale LANG=en_US.UTF-8
 # --- Phase 3: Install packages ---
 echo "[3/6] Installing packages (this takes a while)..."
 
-chroot "${STAGING}" bash -c '
+# uv: pinned release tarball, checksum-verified on the host and dropped into
+# the image (replaces piping astral.sh/uv/install.sh into a shell).
+UV_TMP="$(mktemp -d)"
+fetch_verified \
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+    "$(pinned_sha "${UV_SHA256}")" \
+    "${UV_TMP}/uv.tar.gz"
+tar -xzf "${UV_TMP}/uv.tar.gz" -C "${UV_TMP}"
+install -m 0755 "${UV_TMP}/uv-x86_64-unknown-linux-gnu/uv"  "${STAGING}/usr/local/bin/uv"
+install -m 0755 "${UV_TMP}/uv-x86_64-unknown-linux-gnu/uvx" "${STAGING}/usr/local/bin/uvx"
+rm -rf "${UV_TMP}"
+
+chroot "${STAGING}" env \
+    PYTHON_VERSION="${PYTHON_VERSION}" \
+    NODE_MAJOR="${NODE_MAJOR}" \
+    AGENT_BROWSER_VERSION="${AGENT_BROWSER_VERSION}" \
+    bash -c '
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update -qq
@@ -132,23 +149,27 @@ apt-get install -y --no-install-recommends \
     build-essential python3 python3-venv python3-dev \
     strace gdb
 
-# Python 3.12 (Ubuntu 22.04 ships 3.10, we want 3.12)
-add-apt-repository -y ppa:deadsnakes/ppa
+# Pinned Python (Ubuntu 22.04 ships 3.10; deadsnakes provides newer series)
+if ! apt-cache show "python${PYTHON_VERSION}" >/dev/null 2>&1; then
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update -qq
+fi
+apt-get install -y --no-install-recommends \
+    "python${PYTHON_VERSION}" "python${PYTHON_VERSION}-venv" "python${PYTHON_VERSION}-dev"
+update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VERSION}" 1
+
+# Node.js LTS from the NodeSource apt repository (signed-by keyring; replaces
+# piping setup_NN.x into a shell).
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
 apt-get update -qq
-apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev
-update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-
-# uv — fast Python package manager
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cp /root/.local/bin/uv /usr/local/bin/uv
-cp /root/.local/bin/uvx /usr/local/bin/uvx
-
-# Node.js 22 (for browser automation and other tools)
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt-get install -y nodejs
 
-# agent-browser — CLI browser automation for AI agents
-npm install -g agent-browser
+# agent-browser — CLI browser automation for AI agents (pinned)
+npm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 agent-browser install --with-deps 2>/dev/null || true
 
 # Clean up apt cache
@@ -247,29 +268,22 @@ cp -a "${OVERLAY}/opt/tools" "${STAGING}/opt/tools"
 chmod 755 "${STAGING}/opt/tools/explore-tools"
 ln -sf /opt/tools/explore-tools "${STAGING}/usr/local/bin/explore-tools"
 
-# Install Python dependencies via uv
+# Install Python dependencies via uv, from the hash-pinned lock.
+#
+# requirements.lock pins every transitive dependency with sha256 hashes
+# (regenerate with `sandbox-ctl deps lock` after editing requirements.txt);
+# --require-hashes makes uv refuse anything not in it, so a compromised or
+# re-published package cannot enter the image at build time.
 #
 # NOTE (observability, ADR 0003): LangChain span instrumentation is the
 # hand-rolled /opt/agent/otel_callbacks.py (shipped by the overlay cp -a
 # above) — deliberately NOT the opentelemetry-instrumentation-langchain pip
-# package, so this dependency list is unchanged and no new packages are baked
-# into the image.
-chroot "${STAGING}" bash -c '
+# package.
+chroot "${STAGING}" env PYTHON_VERSION="${PYTHON_VERSION}" bash -c '
+set -euo pipefail
 cd /opt/agent
-uv venv --python python3.12 .venv
-uv pip install --python .venv/bin/python \
-    langchain langchain-core langchain-openai \
-    langgraph \
-    requests beautifulsoup4 \
-    opentelemetry-api opentelemetry-sdk \
-    opentelemetry-exporter-otlp \
-    opentelemetry-instrumentation-requests \
-    opentelemetry-instrumentation-httpx
-
-# Install deepagents from GitHub (not yet on PyPI)
-uv pip install --python .venv/bin/python \
-    "git+https://github.com/langchain-ai/deepagents.git#subdirectory=libs/deepagents" || \
-    echo "WARNING: deepagents install failed (may need manual install later)"
+uv venv --python "python${PYTHON_VERSION}" .venv
+uv pip install --python .venv/bin/python --require-hashes -r requirements.lock
 '
 
 echo "[5/6] Agent runtime installed."
