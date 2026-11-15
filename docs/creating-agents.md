@@ -310,11 +310,25 @@ config/install-scripts/
   github-cli.sh     # gh via apt keyring
   terraform.sh      # HashiCorp apt repo
   kubectl.sh        # Kubernetes apt repo
-  helm.sh           # get-helm-3 installer
-  trivy.sh          # Aqua Security installer
-  grype.sh          # Anchore installer
-  sentry-cli.sh     # Sentry CLI installer
+  helm.sh           # pinned release tarball (sha256 verified)
+  trivy.sh          # pinned release tarball (sha256 verified)
+  grype.sh          # pinned release tarball (sha256 verified)
+  sentry-cli.sh     # pinned release binary (sha256 verified)
   semgrep.sh        # pip install
+```
+
+Install scripts run inside the rootfs chroot as part of the compiled
+`customize.sh`, each in its own subshell. The pins from `config/versions.env`
+and the `fetch_verified <url> <sha256> <output>` helper are available to them, so
+a new script should add its version and checksum to `config/versions.env` and
+download with `fetch_verified` rather than piping an installer into a shell:
+
+```bash
+fetch_verified \
+    "https://example.com/releases/${MYTOOL_VERSION}/mytool-linux-amd64" \
+    "$(pinned_sha "${MYTOOL_SHA256}")" \
+    /usr/local/bin/mytool
+chmod 0755 /usr/local/bin/mytool
 ```
 
 Reference them from a capability preset or directly in your agent YAML:

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gateway:
+    name: Gateway (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache: false   # std-lib only: no go.sum, nothing to cache
+      - name: Vet
+        working-directory: gateway
+        run: go vet ./...
+      - name: Test
+        working-directory: gateway
+        run: go test -race ./...
+
+  agent-runtime:
+    name: Agent runtime (Python, locked deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Install the hash-pinned lock
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python --require-hashes \
+            -r rootfs/overlay/opt/agent/requirements.lock
+          uv pip install --python .venv/bin/python pytest
+      - name: Lock satisfies requirements.txt
+        run: |
+          uv pip install --python .venv/bin/python --dry-run \
+            -r rootfs/overlay/opt/agent/requirements.txt 2>&1 | tee dry-run.txt
+          ! grep -qE '^ [+-] ' dry-run.txt
+      - name: Test
+        run: PYTHONPATH=rootfs/overlay/opt/agent .venv/bin/python -m pytest rootfs/tests -q
+
+  shell:
+    name: Shell + config compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck jq python3-yaml
+      - name: ShellCheck (errors)
+        run: |
+          git ls-files '*.sh' bin/sandbox-ctl rootfs/overlay/sbin/agent-init \
+            | xargs shellcheck -S error -x
+      - name: Unit tests
+        run: test/unit-shell.sh

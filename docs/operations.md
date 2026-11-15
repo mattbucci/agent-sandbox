@@ -17,10 +17,14 @@ sudo bin/sandbox-ctl launch researcher --vcpus 2 --mem 4096
 # Stop one agent
 sudo bin/sandbox-ctl stop debugger
 
-# Stop everything
+# Stop everything (destroys the instances)
 sudo bin/sandbox-ctl stop-all
 
-# Clean up state from stopped VMs
+# Stop everything but keep the instances for the next boot (what the systemd
+# unit runs on shutdown)
+sudo bin/sandbox-ctl stop-all --keep-state
+
+# Clean up state from stopped VMs and orphaned jailer chroots
 sudo bin/sandbox-ctl cleanup
 ```
 
@@ -349,6 +353,9 @@ sudo squid -k parse
 VMs auto-restore on host reboot via the `agent-sandbox.service` systemd unit:
 
 ```bash
+# Install / refresh the unit (substitutes this checkout's path)
+sudo bin/sandbox-ctl install-service
+
 # Check service status
 sudo systemctl status agent-sandbox
 
@@ -359,7 +366,50 @@ cat /var/log/agent-sandbox-boot.log
 sudo bin/agent-sandbox-boot.sh
 ```
 
-The service restores: IP forwarding, nftables rules, Squid, dnsmasq, all saved VMs from `state/vms/*/info.json`.
+The service restores: IP forwarding, nftables rules, Squid, dnsmasq, all saved VMs
+from `state/vms/*/info.json`, then mnemosyne and the gateway router if they were
+set up on this host.
+
+Restored VMs go through the same code as `launch` (`lib/vm.sh`): they run under
+the jailer and get their egress ACL from the compiled `build/<type>/allowlist.txt`.
+The boot script is safe to re-run on a live host — running VMs are left alone and
+only have their firewall rules re-applied, which is also the fix if a VM has lost
+its rules:
+
+```bash
+sudo nft list table ip vm_filter | grep -c llm    # expect 2 per running VM
+sudo bin/agent-sandbox-boot.sh                    # re-applies anything missing
+```
+
+The LLM passthrough rule needs the LLM host's IP. The service waits up to 60s for
+it to resolve (DNS may not be up yet), then falls back to the address recorded in
+each VM's `info.json` at launch.
+
+## Updating Dependencies
+
+All third-party versions live in `config/versions.env`, each with a SHA-256.
+
+```bash
+bin/sandbox-ctl versions outdated        # what upstream has released
+$EDITOR config/versions.env              # bump a version + its checksum
+bin/sandbox-ctl versions verify          # every pin downloads and matches
+sudo bin/install-firecracker.sh          # host: upgrades in place when the pin changed
+sudo otel/setup-otel.sh                  # host: validates the config, then upgrades
+sudo bin/sandbox-ctl build-base          # guest: rebuild images to pick up guest pins
+```
+
+Policy: pin the newest release that is at least 14 days old. To try a Firecracker
+build before installing it system-wide:
+
+```bash
+sudo SANDBOX_FIRECRACKER_BIN=/path/firecracker SANDBOX_JAILER_BIN=/path/jailer \
+    bin/sandbox-ctl launch coder --name fc-test
+```
+
+Python dependencies of the agent runtime: edit
+`rootfs/overlay/opt/agent/requirements.txt`, run `bin/sandbox-ctl deps lock`, and
+rebuild the base image. The image installs only from `requirements.lock` with
+`--require-hashes`.
 
 ## Base Image Tools
 

@@ -284,9 +284,8 @@ func TestRunAuthAndScope(t *testing.T) {
 // rejected until the run reaches a terminal status and the supervisor releases.
 func TestRunSlotHeldUntilTerminal(t *testing.T) {
 	// Fast supervisor polling; restore after.
-	oldInterval := runPollInterval
-	runPollInterval = 5 * time.Millisecond
-	t.Cleanup(func() { runPollInterval = oldInterval })
+	oldInterval := runPollInterval.Swap(int64(5 * time.Millisecond))
+	t.Cleanup(func() { runPollInterval.Store(oldInterval) })
 
 	m := newRunsMock()
 	cfg := &Config{

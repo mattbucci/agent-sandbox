@@ -173,7 +173,8 @@ bin/setup-github-tokens.sh validate   # check all tokens
 
 ```
 Setup:      setup, build-base, build-agent, build-all
-VMs:        launch, stop, stop-all, status, cleanup
+VMs:        launch, stop, stop-all [--keep-state], status, cleanup, install-service
+Deps:       versions show|outdated|verify, deps lock
 Access:     vnc, logs, ssh
 Config:     config compile, config validate, config list-presets, config docs
 Info:       list-agents, network-status, help
@@ -236,7 +237,10 @@ other local service. Verify with, from inside a VM:
 Launches use the Firecracker **jailer** by default (chroot + dropped privileges
 + cgroup v2). `launch.sh` stages the kernel, rootfs, and config into the
 per-VM chroot (`/srv/jailer/firecracker/<id>/root/`) with chroot-relative paths,
-so this works out of the box. For a quick dev launch without the jailer:
+so this works out of the box. VMs restored after a reboot go through the same
+code (`lib/vm.sh`), so they are jailed too. The chroot hard-links the VM's
+rootfs; stopping a VM removes it, and `sandbox-ctl cleanup` sweeps any left
+behind by older versions. For a quick dev launch without the jailer:
 
 ```bash
 sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent
@@ -245,12 +249,31 @@ sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent
 ### Reboot persistence & optional hardening
 
 `bin/sandbox-ctl setup` applies host networking at runtime; it does **not**
-survive a reboot on its own. Enable the bundled service so nftables/Squid/dnsmasq
-(and any running VMs) are restored on boot:
+survive a reboot on its own. Install the bundled service so nftables/Squid/dnsmasq,
+every VM that was running, mnemosyne and the gateway router are restored on boot:
 
 ```bash
-sudo cp bin/agent-sandbox.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable agent-sandbox.service
+sudo bin/sandbox-ctl install-service
+```
+
+On shutdown the unit runs `stop-all --keep-state`, which stops the VMs but keeps
+their disks so the next boot brings the same instances back.
+
+### Pinned dependencies
+
+Every third-party download is pinned in one file, [`config/versions.env`](config/versions.env),
+with a SHA-256 that is checked before anything is installed — on the host
+(Firecracker, guest kernel, OTel collector, noVNC) and inside the images (uv,
+Compose, Helm, Trivy, Grype, sentry-cli). No installer is piped from a moving
+branch. The agent runtime's Python dependencies are installed from a hash-pinned
+lock (`rootfs/overlay/opt/agent/requirements.lock`). See
+[ADR 0004](docs/adr/0004-pinned-verified-dependencies-single-vm-lifecycle.md).
+
+```bash
+bin/sandbox-ctl versions show       # pinned vs installed on this host
+bin/sandbox-ctl versions outdated   # pinned vs newest upstream release
+bin/sandbox-ctl versions verify     # re-download every artifact, check sha256
+bin/sandbox-ctl deps lock           # regenerate requirements.lock
 ```
 
 `harden-host.sh` also flags **SMT/hyperthreading** as a side-channel risk for
