@@ -891,6 +891,10 @@ cmd_memory() {
                 "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=${max_out}"
                 "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS=${max_out}"
                 "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=${max_out}"
+                # Writing a mental model is a multi-step LLM task; a local model
+                # sharing the router with the agents needs well over the
+                # default 300s, after which Hindsight cancels the refresh.
+                "HINDSIGHT_API_REFLECT_WALL_TIMEOUT=${HINDSIGHT_REFLECT_WALL_TIMEOUT:-1800}"
                 # Every request needs the bearer token.
                 "HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension"
                 "HINDSIGHT_API_TENANT_API_KEY=${token}"
