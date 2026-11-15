@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-stdio <-> SSE bridge for an MCP server (standard library only).
+stdio <-> HTTP bridge for a remote MCP server (standard library only).
 
-    mcp_sse_bridge.py <sse-url>          # bearer from MCP_BRIDGE_AUTHORIZATION
+    mcp_sse_bridge.py <sse-url>            # legacy HTTP+SSE transport
+    mcp_sse_bridge.py --http <mcp-url>     # streamable HTTP transport
+                                           # bearer from MCP_BRIDGE_AUTHORIZATION
 
 An MCP client that speaks stdio launches this as its "server"; the bridge
-relays newline-delimited JSON-RPC between that client and a remote MCP server
-using the HTTP+SSE transport (GET <sse-url> for the event stream, POST to the
-endpoint the stream announces).
+relays newline-delimited JSON-RPC between that client and a remote MCP server.
+
+  HTTP+SSE         GET <sse-url> for the event stream, POST to the endpoint the
+                   stream announces (mnemosyne).
+  streamable HTTP  POST each message to <mcp-url>; the reply comes back in the
+                   response body, as JSON or as an event stream (Hindsight).
 
 Why it exists: the omp harness reaches the shared mnemosyne memory server over
 SSE, and omp's own SSE client is reset mid-handshake from inside the VM while
@@ -115,11 +120,102 @@ class Bridge:
         return 0  # stdin closed: the client is done with us
 
 
+class HttpBridge:
+    """stdio <-> streamable-HTTP MCP (POST per message, reply in the body)."""
+
+    # A tool call can run for minutes (Hindsight's reflect reasons with an LLM).
+    REQUEST_TIMEOUT_S = 900
+
+    def __init__(self, url, authorization=""):
+        self.url = url
+        self.headers = {"Authorization": authorization} if authorization else {}
+        self.session_id = None
+        self._out_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+
+    def _emit(self, out, text):
+        with self._out_lock:
+            out.write(text.replace("\n", " ") + "\n")
+            out.flush()
+
+    def _error(self, out, message, reason):
+        """Answer a request ourselves so the client does not wait forever."""
+        if isinstance(message, dict) and "id" in message:
+            self._emit(out, json.dumps({
+                "jsonrpc": "2.0", "id": message["id"],
+                "error": {"code": -32000, "message": f"mcp bridge: {reason}"}}))
+
+    def handle(self, line, out):
+        message = json.loads(line)
+        headers = {**self.headers, "Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        with self._state_lock:
+            if self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
+        req = urllib.request.Request(self.url, data=line.encode("utf-8"), method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT_S) as resp:
+                sid = resp.headers.get("Mcp-Session-Id")
+                if sid:
+                    with self._state_lock:
+                        self.session_id = sid
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if "text/event-stream" in ctype:
+                    data = []
+                    for raw in resp:
+                        text = raw.decode("utf-8", "replace").rstrip("\r\n")
+                        if text == "":
+                            if data:
+                                self._emit(out, "\n".join(data))
+                            data = []
+                        elif text.startswith("data:"):
+                            data.append(text[5:].lstrip(" "))
+                    if data:
+                        self._emit(out, "\n".join(data))
+                else:
+                    body = resp.read().decode("utf-8", "replace").strip()
+                    if body:  # notifications are answered 202 with no body
+                        self._emit(out, body)
+        except Exception as e:  # noqa: BLE001
+            log(f"request failed: {e}")
+            self._error(out, message, str(e))
+
+    def run(self, stdin=None, out=None):
+        stdin = stdin or sys.stdin
+        out = out or sys.stdout
+        workers = []
+        for line in stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                log("dropping non-JSON input line")
+                continue
+            if isinstance(message, dict) and message.get("method") == "initialize":
+                # The handshake establishes the session id every later request
+                # carries, so it must finish before anything else is sent.
+                self.handle(line, out)
+                continue
+            # Everything else runs concurrently: one slow tool call must not
+            # hold up the others.
+            t = threading.Thread(target=self.handle, args=(line, out), daemon=True)
+            t.start()
+            workers.append(t)
+        for t in workers:
+            t.join(timeout=self.REQUEST_TIMEOUT_S)
+        return 0
+
+
 def main(argv):
-    if len(argv) != 2:
-        log("usage: mcp_sse_bridge.py <sse-url>")
-        return 2
-    return Bridge(argv[1], os.environ.get("MCP_BRIDGE_AUTHORIZATION", "")).run()
+    auth = os.environ.get("MCP_BRIDGE_AUTHORIZATION", "")
+    if len(argv) == 3 and argv[1] == "--http":
+        return HttpBridge(argv[2], auth).run()
+    if len(argv) == 2:
+        return Bridge(argv[1], auth).run()
+    log("usage: mcp_sse_bridge.py <sse-url> | --http <mcp-url>")
+    return 2
 
 
 if __name__ == "__main__":

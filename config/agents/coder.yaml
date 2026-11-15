@@ -70,3 +70,14 @@ prompt:
       files. Your FINAL message must always contain the code in a fenced block —
       never end on a tool call or an empty turn. If you did run commands, still
       finish by restating the complete code.
+
+# Long-term memory (memory.backend: hindsight). The agent's turns are retained
+# automatically; these are the standing questions kept answered from them, in
+# addition to the shared ones in sandbox.yaml.
+memory:
+  mental_models:
+    - id: playbook
+      name: Coder playbook
+      query: >
+        What coding conventions, project structures, tooling quirks and
+        recurring mistakes has the coder agent learned across its tasks?

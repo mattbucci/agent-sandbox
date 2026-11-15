@@ -82,6 +82,15 @@ class OmpAgentTest(unittest.IsolatedAsyncioTestCase):
         self.make_agent(MNEMOSYNE_ENABLED="1", MNEMOSYNE_URL="http://mnemosyne.host:8077/sse")
         self.assertFalse(os.path.exists(os.path.join(agent.config.agent_dir, "mcp.json")))
 
+    def test_hindsight_tools_use_the_per_bank_mcp_endpoint_through_the_bridge(self):
+        agent = self.make_agent(HINDSIGHT_ENABLED="1", HINDSIGHT_URL="http://10.0.0.1:8890/",
+                                HINDSIGHT_TOKEN="hs_x", HINDSIGHT_BANK="agent-sandbox")
+        server = json.load(open(os.path.join(agent.config.agent_dir, "mcp.json")))["mcpServers"]["memory"]
+        self.assertEqual(server["type"], "stdio")
+        self.assertEqual(server["args"][1:], ["--http", "http://10.0.0.1:8890/mcp/agent-sandbox/"])
+        self.assertEqual(server["env"]["MCP_BRIDGE_AUTHORIZATION"], "Bearer hs_x")
+        self.assertNotIn("hs_x", " ".join(server["args"]))
+
     def test_command_line(self):
         cmd = self.make_agent().config.command("abc")
         self.assertEqual(cmd[:3], [FAKE_OMP, "--mode", "rpc"])

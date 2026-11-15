@@ -47,6 +47,10 @@ from agent import create_agent, init_tracing
 # approval flow). No heavy deps; inert on the chat/task paths.
 import approvals
 
+# Long-term memory (Hindsight): recalled before a turn, retained after it.
+# Standard library only; a no-op unless HINDSIGHT_ENABLED is set.
+from memory import get_memory
+
 # Guarded OTel imports: with opentelemetry absent every tracing hook below
 # degrades to a no-op and the wire behaviour is unchanged.
 try:
@@ -160,6 +164,59 @@ def _evict_sessions_locked():
         SESSIONS_LAST_ACCESS.pop(victim, None)
         logger.info("session %s evicted (LRU, over cap of %d sessions)",
                     victim, MAX_SESSIONS)
+
+# ---------------------------------------------------------------------------
+# Long-term memory around a turn.
+#
+# Before the agent runs, the newest user message is given the agent's mental
+# models plus the memories most relevant to it; after it answers, the exchange
+# is queued for Hindsight to extract facts from. Only the copy handed to the
+# agent is augmented — the session history keeps the user's own words, so
+# recalled memory is never re-stored as if the user had said it.
+# ---------------------------------------------------------------------------
+_MEMORY_SESSIONS = {}              # sid -> True, sessions already given the models
+_MEMORY_SESSIONS_LOCK = threading.Lock()
+_MEMORY_SESSIONS_MAX = 1000
+
+
+def _first_turn_of_session(sid):
+    with _MEMORY_SESSIONS_LOCK:
+        if sid in _MEMORY_SESSIONS:
+            return False
+        if len(_MEMORY_SESSIONS) >= _MEMORY_SESSIONS_MAX:
+            _MEMORY_SESSIONS.pop(next(iter(_MEMORY_SESSIONS)))
+        _MEMORY_SESSIONS[sid] = True
+        return True
+
+
+def remember_before(ag, sid, user_text):
+    """The user message as the agent should see it: memory first, then the text.
+
+    A harness that keeps its own conversation (it exposes for_session) already
+    has the mental models from the session's first turn, so later turns only
+    add what is relevant to the new message. A stateless harness is handed the
+    whole history each turn and gets the models every time.
+    """
+    memory = get_memory()
+    if not memory.enabled or not isinstance(user_text, str) or not user_text.strip():
+        return user_text
+    stateful = callable(getattr(ag, "for_session", None))
+    include_models = _first_turn_of_session(sid) if stateful else True
+    try:
+        return memory.with_context(user_text, include_models=include_models)
+    except Exception:  # noqa: BLE001 — memory must never fail a turn
+        logger.warning("memory context failed; continuing without it", exc_info=True)
+        return user_text
+
+
+def remember_after(sid, user_text, assistant_text):
+    """Queue the finished exchange for long-term memory (never raises)."""
+    try:
+        if isinstance(user_text, str):
+            get_memory().retain_turn(sid, user_text, assistant_text)
+    except Exception:  # noqa: BLE001
+        logger.warning("memory retain failed", exc_info=True)
+
 
 # Lazily-built, reused agent (DeepAgents graph or OmpAgent, per HARNESS).
 _AGENT = None
@@ -282,9 +339,10 @@ async def _drive_run(ctx, user_message, session_id):
     ctx.emit({"event": "run.started"})
     history = _session_history(session_id)
     new_user = {"role": "user", "content": user_message}
-    agent_input = {"messages": history + [new_user]}
     try:
         ag = agent_for_session(get_agent(), session_id)
+        agent_input = {"messages": history + [
+            {"role": "user", "content": remember_before(ag, session_id, user_message)}]}
         token = approvals.current_run.set(ctx)
         try:
             result = await ag.ainvoke(agent_input)
@@ -294,6 +352,7 @@ async def _drive_run(ctx, user_message, session_id):
         usage = _extract_usage(result) or {}
         _session_append(session_id, history,
                         [new_user, {"role": "assistant", "content": text}])
+        remember_after(session_id, user_message, text)
         if text:
             ctx.emit({"event": "message.delta", "delta": text})
         ctx.set_status("completed", output=text, usage=usage)
@@ -707,7 +766,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
         # Snapshot this session's history; build agent input = history + [new user].
         sid = self.headers.get("X-Hermes-Session-Id") or DEFAULT_SESSION
         history = _session_history(sid)
-        agent_input = {"messages": history + [new_user]}
 
         logger.info("chat session=%s agent=%s stream=%s history_turns=%d",
                     sid, resp_model, stream, len(history))
@@ -741,6 +799,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": {"message": str(e), "type": "internal_error"}})
             return
 
+        # The agent sees the user message with long-term memory in front of it;
+        # history (below) keeps the message as the user wrote it.
+        user_text = _content_to_text(new_user["content"])
+        agent_input = {"messages": history + [
+            {"role": "user", "content": remember_before(ag, sid, new_user["content"])}]}
+
         if stream:
             assistant_text = self._do_stream(ag, agent_input, resp_model, carrier, span_attrs)
         else:
@@ -752,6 +816,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         # Append this turn so the next request on the session continues it.
         _session_append(sid, history,
                         [new_user, {"role": "assistant", "content": assistant_text}])
+        remember_after(sid, user_text, assistant_text)
 
     def _do_blocking(self, ag, agent_input, resp_model, carrier, span_attrs):
         created = int(time.time())

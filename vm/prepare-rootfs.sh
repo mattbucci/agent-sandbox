@@ -93,7 +93,14 @@ MNEMOSYNE_ENABLED="${MNEMOSYNE_ENABLED:-0}"
 MNEMOSYNE_PORT="${MNEMOSYNE_PORT:-8077}"
 MNEMOSYNE_TOKEN="${MNEMOSYNE_TOKEN:-}"
 MNEMOSYNE_URL="${MNEMOSYNE_URL:-}"
+HINDSIGHT_ENABLED="${HINDSIGHT_ENABLED:-0}"
+HINDSIGHT_TOKEN="${HINDSIGHT_TOKEN:-}"
+HINDSIGHT_BANK="${HINDSIGHT_BANK:-agent-sandbox}"
+MEMORY_RECALL_SCOPE="${MEMORY_RECALL_SCOPE:-shared}"
 EOF
+# Optional model limits (only present when configured).
+[[ -n "${OMP_CONTEXT_WINDOW:-}" ]] && echo "OMP_CONTEXT_WINDOW=\"${OMP_CONTEXT_WINDOW}\"" >> "${MOUNT_POINT}/etc/agent.conf"
+[[ -n "${OMP_MAX_TOKENS:-}" ]] && echo "OMP_MAX_TOKENS=\"${OMP_MAX_TOKENS}\"" >> "${MOUNT_POINT}/etc/agent.conf"
 
 # OTel: the collector runs on the host; the VM reaches it at its gateway IP.
 # GATEWAY_IP is exported by launch.sh. Without this, agent.py's init_tracing()
@@ -103,6 +110,10 @@ if [[ -n "${GATEWAY_IP:-}" ]]; then
     cat >> "${MOUNT_POINT}/etc/agent.conf" <<EOF
 OTEL_EXPORTER_OTLP_ENDPOINT="http://${GATEWAY_IP}:4318"
 EOF
+    # Hindsight also runs on the host, reached at the same gateway IP.
+    if [[ "${HINDSIGHT_ENABLED:-0}" == "1" ]]; then
+        echo "HINDSIGHT_URL=\"http://${GATEWAY_IP}:${HINDSIGHT_PORT:-8890}\"" >> "${MOUNT_POINT}/etc/agent.conf"
+    fi
 fi
 
 # /etc/hosts entry for the internal LLM endpoint. agent-init rewrites /etc/hosts
@@ -136,7 +147,12 @@ EOF
     # Even with --network host the container gets its own /etc/hosts, so the
     # mnemosyne.host name is also pinned via --add-host in run-hermes.sh. Only
     # emit the mcp block when memory is enabled for this agent type.
-    if [[ "${MNEMOSYNE_ENABLED:-0}" == "1" && -z "${MNEMOSYNE_TOKEN:-}" ]]; then
+    if [[ "${HINDSIGHT_ENABLED:-0}" == "1" ]]; then
+        # The hermes container is its own agent runtime, so the in-VM memory
+        # hooks (gateway_server.py) do not apply to it, and its MCP client
+        # config for a streamable-HTTP server is not validated here yet.
+        echo "NOTE: memory.backend=hindsight is not wired into the hermes container; it runs without shared memory." >&2
+    elif [[ "${MNEMOSYNE_ENABLED:-0}" == "1" && -z "${MNEMOSYNE_TOKEN:-}" ]]; then
         echo "WARNING: MNEMOSYNE_ENABLED=1 but MNEMOSYNE_TOKEN is empty; skipping mcp block (would 401)." >&2
     elif [[ "${MNEMOSYNE_ENABLED:-0}" == "1" ]]; then
         echo "Wiring mnemosyne MCP server into hermes config.yaml..."

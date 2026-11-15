@@ -11,6 +11,8 @@ files that the bash scripts consume:
   agentconf.py compile-gateway     → state/gateway/gateway.json
   agentconf.py compile-all         → compile global + gateway + all agents
   agentconf.py validate <type>     → validate agent YAML + preset references
+  agentconf.py memory-apply [url]  → sync the bank + declared mental models to
+                                      Hindsight (--dry-run prints the plan)
   agentconf.py list                → list agent types
   agentconf.py list-presets [cat]  → list presets (egress|capabilities|prompts)
   agentconf.py docs                → generate docs/presets-reference.md
@@ -81,6 +83,192 @@ def load_agent(agent_type: str) -> dict:
         print(f"ERROR: Agent not found: {agent_type} ({path})", file=sys.stderr)
         sys.exit(1)
     return load_yaml(path)
+
+
+# ---------------------------------------------------------------------------
+# Memory (config `memory:` block)
+# ---------------------------------------------------------------------------
+MEMORY_BACKENDS = ("hindsight", "mnemosyne")
+# Hindsight's own default (8888) is taken on the host by the OTel collector's
+# telemetry endpoint, so the sandbox uses 8890.
+MEMORY_DEFAULT_PORT = {"hindsight": 8890, "mnemosyne": 8077}
+
+
+def memory_settings(global_config: dict) -> dict:
+    """Normalize the `memory:` block.
+
+    `backend` selects the service: "hindsight" (hierarchical memory: facts ->
+    observations -> mental models) or "mnemosyne" (the earlier flat MCP store,
+    and the default when `backend` is absent so existing configs keep working).
+    """
+    memory = global_config.get("memory", {}) or {}
+    backend = (memory.get("backend") or "mnemosyne").strip()
+    return {
+        "enabled": bool(memory.get("enabled", False)),
+        "backend": backend,
+        "port": memory.get("port") or MEMORY_DEFAULT_PORT.get(backend, 8890),
+        "token": memory.get("token", "") or "",
+        "bank": memory.get("bank") or "agent-sandbox",
+        "mission": (memory.get("mission") or "").strip(),
+        "recall_scope": memory.get("recall_scope") or "shared",
+        "llm_model": memory.get("llm_model") or (global_config.get("llm", {}) or {}).get("model", ""),
+        "max_completion_tokens": memory.get("max_completion_tokens") or 16000,
+        "embeddings": memory.get("embeddings", "fastembed") or "fastembed",
+        "mental_models": memory.get("mental_models") or [],
+    }
+
+
+def _slug(text: str) -> str:
+    out = "".join(c.lower() if c.isalnum() else "-" for c in str(text))
+    return "-".join(part for part in out.split("-") if part)
+
+
+def memory_plan(global_config: dict, agents: dict) -> dict:
+    """The declared top of the memory hierarchy: the bank and its mental models.
+
+    Mental models are standing questions Hindsight keeps answered. Ones declared
+    under `memory.mental_models` in sandbox.yaml are shared by every agent
+    (untagged); ones under `memory.mental_models` in an agent YAML belong to
+    that agent — tagged agent:<type>, so they are built from that agent's own
+    memories and shown only to it.
+    """
+    settings = memory_settings(global_config)
+    models, errors, seen = [], [], set()
+
+    def add(spec, agent_type=None):
+        where = f"agent '{agent_type}'" if agent_type else "sandbox.yaml"
+        if not isinstance(spec, dict) or not spec.get("name") or not spec.get("query"):
+            errors.append(f"{where}: each memory.mental_models entry needs 'name' and 'query'")
+            return
+        base = _slug(spec.get("id") or spec["name"])
+        model_id = f"{agent_type}-{base}" if agent_type else base
+        if model_id in seen:
+            errors.append(f"{where}: duplicate mental model id '{model_id}'")
+            return
+        seen.add(model_id)
+        models.append({
+            "id": model_id,
+            "name": spec["name"],
+            "source_query": " ".join(str(spec["query"]).split()),
+            "tags": [f"agent:{agent_type}"] if agent_type else [],
+            "max_tokens": int(spec.get("max_tokens") or 2048),
+        })
+
+    for spec in settings["mental_models"]:
+        add(spec)
+    for agent_type in sorted(agents):
+        agent_memory = agents[agent_type].get("memory", {}) or {}
+        for spec in agent_memory.get("mental_models") or []:
+            add(spec, agent_type)
+
+    return {
+        "backend": settings["backend"],
+        "bank": {"id": settings["bank"], "mission": settings["mission"]},
+        "mental_models": models,
+        "errors": errors,
+    }
+
+
+def _all_agents() -> dict:
+    return {p.stem: load_yaml(p) for p in sorted(AGENTS_DIR.glob("*.yaml"))}
+
+
+def _hindsight_call(base_url: str, token: str, method: str, path: str, body=None):
+    """One Hindsight REST call. Returns (status, json-or-None)."""
+    import urllib.error
+    import urllib.request
+
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(base_url + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, {"detail": raw.decode("utf-8", "replace")[:300]}
+
+
+def cmd_memory_apply(base_url: str = "", dry_run: bool = False):
+    """Create/update the bank and the declared mental models in Hindsight.
+
+    Idempotent: models are addressed by a stable id derived from the config, so
+    re-applying only changes what the config changed. Models that exist in the
+    bank but are no longer declared are reported, never deleted.
+    """
+    config = load_global_config()
+    settings = memory_settings(config)
+    plan = memory_plan(config, _all_agents())
+    if plan["errors"]:
+        for e in plan["errors"]:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return False
+    if settings["backend"] != "hindsight":
+        print(f"memory.backend is '{settings['backend']}': nothing to apply (mental models need hindsight).")
+        return True
+
+    bank = plan["bank"]["id"]
+    print(f"Bank: {bank}")
+    for m in plan["mental_models"]:
+        scope = ", ".join(m["tags"]) or "shared"
+        print(f"  mental model {m['id']:<32} [{scope}] {m['name']}")
+    if dry_run:
+        return True
+
+    base_url = (base_url or f"http://127.0.0.1:{settings['port']}").rstrip("/")
+    token = settings["token"]
+    bank_path = f"/v1/default/banks/{bank}"
+
+    def call(method, path, body=None):
+        status, payload = _hindsight_call(base_url, token, method, path, body)
+        if status >= 400:
+            raise RuntimeError(f"{method} {path}: HTTP {status} {payload}")
+        return payload
+
+    try:
+        bank_body = {"name": bank}
+        if plan["bank"]["mission"]:
+            bank_body["mission"] = plan["bank"]["mission"]
+        call("PUT", bank_path, bank_body)
+
+        existing = call("GET", f"{bank_path}/mental-models?detail=content&limit=100") or {}
+        items = existing.get("items") if isinstance(existing, dict) else existing
+        by_id = {m["id"]: m for m in items or []}
+
+        created = updated = unchanged = 0
+        for m in plan["mental_models"]:
+            # Rebuild as soon as consolidation produces new observations in
+            # scope, so a model tracks what the bank learns without a schedule.
+            trigger = {"refresh_after_consolidation": True}
+            current = by_id.get(m["id"])
+            if current is None:
+                call("POST", f"{bank_path}/mental-models", {**m, "trigger": trigger})
+                created += 1
+            elif (current.get("name"), current.get("source_query"), sorted(current.get("tags") or []),
+                  current.get("max_tokens")) != (m["name"], m["source_query"], sorted(m["tags"]), m["max_tokens"]):
+                call("PATCH", f"{bank_path}/mental-models/{m['id']}",
+                     {k: m[k] for k in ("name", "source_query", "tags", "max_tokens")})
+                updated += 1
+            else:
+                unchanged += 1
+        declared = {m["id"] for m in plan["mental_models"]}
+        extra = sorted(i for i in by_id if i not in declared)
+    except (RuntimeError, OSError) as e:
+        print(f"ERROR: could not apply memory plan to {base_url}: {e}", file=sys.stderr)
+        return False
+
+    print(f"Applied: {created} created, {updated} updated, {unchanged} unchanged.")
+    if extra:
+        print("Not declared in config (left in place): " + ", ".join(extra))
+    return True
 
 
 def load_global_config() -> dict:
@@ -300,10 +488,17 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
     # Mnemosyne shared agent-memory (MCP over SSE). Inside every VM the host is
     # reachable as mnemosyne.host (published by agent-init -> the VM gateway IP),
     # so the URL is stable regardless of the per-VM gateway address.
-    memory = global_config.get("memory", {}) or {}
-    mnemosyne_enabled = 1 if memory.get("enabled", False) else 0
-    mnemosyne_port = memory.get("port", 8077)
-    mnemosyne_token = memory.get("token", "") or ""
+    #
+    # With memory.backend "hindsight" the agent instead gets HINDSIGHT_* (the
+    # URL itself is written at launch by vm/prepare-rootfs.sh, which knows the
+    # VM's gateway IP). An agent opts out with `memory: {enabled: false}`.
+    mem = memory_settings(global_config)
+    agent_memory = agent.get("memory", {}) or {}
+    mem_on = mem["enabled"] and agent_memory.get("enabled", True)
+    mnemosyne_enabled = 1 if mem_on and mem["backend"] == "mnemosyne" else 0
+    hindsight_enabled = 1 if mem_on and mem["backend"] == "hindsight" else 0
+    mnemosyne_port = mem["port"] if mem["backend"] == "mnemosyne" else 8077
+    mnemosyne_token = mem["token"]
     mnemosyne_url = f"http://mnemosyne.host:{mnemosyne_port}/sse"
 
     lines = [
@@ -321,7 +516,22 @@ def compile_agent_conf(agent: dict, global_config: dict) -> str:
         f'MNEMOSYNE_PORT="{mnemosyne_port}"',
         f'MNEMOSYNE_TOKEN="{mnemosyne_token}"',
         f'MNEMOSYNE_URL="{mnemosyne_url}"',
+        f'HINDSIGHT_ENABLED="{hindsight_enabled}"',
+        f'HINDSIGHT_PORT="{mem["port"] if mem["backend"] == "hindsight" else 8890}"',
+        f'HINDSIGHT_TOKEN="{mem["token"] if hindsight_enabled else ""}"',
+        f'HINDSIGHT_BANK="{agent_memory.get("bank") or mem["bank"]}"',
+        f'MEMORY_RECALL_SCOPE="{agent_memory.get("recall_scope") or mem["recall_scope"]}"',
     ]
+
+    # Model limits for harnesses that must be told them (omp advertises them to
+    # its own context management). llm.context_window / llm.max_output_tokens
+    # in sandbox.yaml, overridable per agent under vm:. Unset -> harness defaults.
+    context_window = vm.get("context_window") or llm.get("context_window")
+    max_output = vm.get("max_output_tokens") or llm.get("max_output_tokens")
+    if context_window:
+        lines.append(f'OMP_CONTEXT_WINDOW="{int(context_window)}"')
+    if max_output:
+        lines.append(f'OMP_MAX_TOKENS="{int(max_output)}"')
 
     # GitHub token injection — read from secrets file if it exists
     agent_type = agent_info.get("type", "generic")
@@ -381,7 +591,7 @@ def cmd_compile_global():
     fc = config.get("firecracker", {})
     rootfs = config.get("rootfs", {})
     squid = config.get("squid", {})
-    memory = config.get("memory", {}) or {}
+    mem = memory_settings(config)
 
     lines = [
         "# Auto-generated from config/sandbox.yaml",
@@ -412,10 +622,16 @@ def cmd_compile_global():
         f'SQUID_HTTP_PORT={squid.get("http_port", 3128)}',
         f'SQUID_HTTPS_PORT={squid.get("https_port", 3129)}',
         "",
-        f'MEMORY_ENABLED={1 if memory.get("enabled", False) else 0}',
-        f'MNEMOSYNE_PORT={memory.get("port", 8077)}',
-        f'MNEMOSYNE_TOKEN="{memory.get("token", "") or ""}"',
-        f'MNEMOSYNE_EMBEDDINGS="{memory.get("embeddings", "fastembed") or "fastembed"}"',
+        f'MEMORY_ENABLED={1 if mem["enabled"] else 0}',
+        f'MEMORY_BACKEND="{mem["backend"]}"',
+        f'MNEMOSYNE_PORT={mem["port"] if mem["backend"] == "mnemosyne" else 8077}',
+        f'MNEMOSYNE_TOKEN="{mem["token"]}"',
+        f'MNEMOSYNE_EMBEDDINGS="{mem["embeddings"]}"',
+        f'HINDSIGHT_PORT={mem["port"] if mem["backend"] == "hindsight" else 8890}',
+        f'HINDSIGHT_TOKEN="{mem["token"]}"',
+        f'HINDSIGHT_BANK="{mem["bank"]}"',
+        f'HINDSIGHT_LLM_MODEL="{mem["llm_model"]}"',
+        f'HINDSIGHT_MAX_COMPLETION_TOKENS={mem["max_completion_tokens"]}',
     ]
 
     # Per-agent rootfs size overrides -> ROOTFS_SIZE_MB_<type> (hyphens -> _).
@@ -525,6 +741,15 @@ def cmd_validate(agent_type: str):
     needs = HARNESS_CAPABILITY.get(harness)
     if needs and needs not in agent.get("capabilities", {}).get("presets", []):
         errors.append(f"agent.harness '{harness}' requires the '{needs}' capability preset")
+
+    # Validate memory: the backend, and this agent's mental models
+    global_config = load_global_config() if (CONFIG_DIR / "sandbox.yaml").exists() else {}
+    backend = memory_settings(global_config)["backend"]
+    if backend not in MEMORY_BACKENDS:
+        errors.append(f"Unknown memory.backend '{backend}' (expected one of: {', '.join(MEMORY_BACKENDS)})")
+    errors.extend(memory_plan({}, {agent_type: agent})["errors"])
+    if (agent.get("memory", {}) or {}).get("mental_models") and backend != "hindsight" and global_config:
+        warnings.append("memory.mental_models are only used with memory.backend: hindsight")
 
     # Validate egress presets
     for p in agent.get("egress", {}).get("presets", []):
@@ -702,6 +927,11 @@ def main():
     elif cmd == "validate" and len(sys.argv) >= 3:
         ok = cmd_validate(sys.argv[2])
         sys.exit(0 if ok else 1)
+    elif cmd == "memory-apply":
+        args = sys.argv[2:]
+        dry = "--dry-run" in args
+        urls = [a for a in args if not a.startswith("--")]
+        sys.exit(0 if cmd_memory_apply(urls[0] if urls else "", dry_run=dry) else 1)
     elif cmd == "list":
         cmd_list()
     elif cmd == "list-presets":

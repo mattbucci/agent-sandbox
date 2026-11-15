@@ -125,5 +125,83 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(len(self.server.seen["posts"]), 1)
 
 
+class FakeStreamableServer:
+    """Streamable-HTTP MCP: replies in the POST body, as JSON or an event stream."""
+
+    def __init__(self):
+        seen = {"sessions": [], "auth": []}
+        self.seen = seen
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                msg = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                seen["sessions"].append(self.headers.get("Mcp-Session-Id"))
+                seen["auth"].append(self.headers.get("Authorization"))
+                if "id" not in msg:                      # notification
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                if msg["method"] == "boom":
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                reply = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}})
+                self.send_response(200)
+                if msg["method"] == "initialize":
+                    self.send_header("Mcp-Session-Id", "sess-1")
+                if msg["method"] == "tools/list":        # plain JSON body
+                    body = reply.encode()
+                    self.send_header("Content-Type", "application/json")
+                else:                                    # event-stream body
+                    body = b"event: message\ndata: " + reply.encode() + b"\n\n"
+                    self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/mcp/bank/"
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class HttpBridgeTest(unittest.TestCase):
+    def setUp(self):
+        self.server = FakeStreamableServer()
+        self.addCleanup(self.server.close)
+
+    def run_bridge(self, messages):
+        out = io.StringIO()
+        bridge = mcp_sse_bridge.HttpBridge(self.server.url, "Bearer t")
+        self.assertEqual(bridge.run(stdin=[json.dumps(m) + "\n" for m in messages], out=out), 0)
+        return bridge, {json.loads(l)["id"]: json.loads(l) for l in out.getvalue().splitlines()}
+
+    def test_relays_json_and_event_stream_replies(self):
+        bridge, replies = self.run_bridge([
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call"},
+        ])
+        self.assertEqual(sorted(replies), [1, 2, 3])
+        self.assertEqual(replies[2]["result"], {"echo": "tools/list"})
+        self.assertEqual(replies[3]["result"], {"echo": "tools/call"})
+        # The session id from initialize is carried on every later request.
+        self.assertEqual(self.server.seen["sessions"][0], None)
+        self.assertEqual(set(self.server.seen["sessions"][1:]), {"sess-1"})
+        self.assertEqual(set(self.server.seen["auth"]), {"Bearer t"})
+
+    def test_failed_request_is_answered_with_an_error(self):
+        _bridge, replies = self.run_bridge([{"jsonrpc": "2.0", "id": 9, "method": "boom"}])
+        self.assertIn("mcp bridge", replies[9]["error"]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -143,11 +143,16 @@ byte-compatible (429/503 backpressure is additive, saturation-only):
   [Dashboard](docs/hermes-gateway.md#dashboard) and the
   [Gateway Runbook](docs/operations.md#gateway-runbook).
 
-Durable agent memory is part of the hosted agent surface: a shared
-[mnemosyne](https://pypi.org/project/mnemosyne-memory/) MCP service (`:8077`,
-`sandbox-ctl mnemosyne start`) backs every agent — see
-[Agent memory (mnemosyne)](docs/hermes-gateway.md#agent-memory-mnemosyne) and
-[ADR 0002](docs/adr/0002-agent-memory-hosted-surface.md).
+Durable agent memory is part of the hosted agent surface. With
+`memory.backend: hindsight`, a shared [Hindsight](https://github.com/vectorize-io/hindsight)
+service on the host (`sandbox-ctl memory start`, `:8890`) gives the agents a
+memory hierarchy — facts extracted from every turn, observations consolidated
+from them, and mental models you declare in YAML — recalled before each turn
+and retained after it. See [Agent memory](docs/memory.md) and
+[ADR 0005](docs/adr/0005-hindsight-hierarchical-memory.md). The earlier
+[mnemosyne](docs/hermes-gateway.md#agent-memory-mnemosyne) MCP store remains
+available as `memory.backend: mnemosyne`
+([ADR 0002](docs/adr/0002-agent-memory-hosted-surface.md)).
 
 ## Security
 
@@ -254,7 +259,7 @@ sudo env NO_JAILER=1 bin/sandbox-ctl launch <agent> --no-agent
 
 `bin/sandbox-ctl setup` applies host networking at runtime; it does **not**
 survive a reboot on its own. Install the bundled service so nftables/Squid/dnsmasq,
-every VM that was running, mnemosyne and the gateway router are restored on boot:
+every VM that was running, the memory service and the gateway router are restored on boot:
 
 ```bash
 sudo bin/sandbox-ctl install-service

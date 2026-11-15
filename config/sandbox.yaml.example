@@ -4,6 +4,10 @@ llm:
   api_base: "http://simple-llm-router.ph.ca:8080/v1"
   api_key: "sk-lan"
   model: "gemma"
+  # Optional limits of the served model, passed to harnesses that manage their
+  # own context (omp). Overridable per agent under vm:.
+  # context_window: 131072
+  # max_output_tokens: 8192
 
 vm_defaults:
   vcpus: 4
@@ -98,13 +102,51 @@ gateway:
     # real LLM alias before forwarding, so the container's API server accepts it.
     hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma", approval: true }
 
-# Mnemosyne shared agent-memory service (MCP over SSE). Runs on the sandbox
-# HOST (bin/sandbox-ctl mnemosyne ...), bound 0.0.0.0:<port>; agent VMs reach it
-# at http://mnemosyne.host:<port>/sse (mnemosyne.host -> the VM's gateway IP).
+# Agent long-term memory. Runs on the sandbox HOST (bin/sandbox-ctl memory ...);
+# agent VMs reach it at their gateway IP.
+#
+# backend: hindsight — hierarchical memory (https://github.com/vectorize-io/hindsight):
+#     mental models   standing questions kept answered, declared below and per agent
+#     observations    beliefs consolidated automatically from facts
+#     facts           world facts + each agent's experiences, extracted from turns
+#   Every agent turn is recalled-for before it runs and retained after it; agents
+#   also get explicit recall / retain / reflect tools. See docs/memory.md.
+# backend: mnemosyne — the earlier flat MCP store (default when `backend` is
+#   absent; port 8077, `sandbox-ctl mnemosyne ...`, `embeddings:` option).
 memory:
   enabled: true
-  port: 8077
-  token: "mnem_your-token"
-  # Embedding backend: "fastembed" (local), "none" (FTS5 keyword-only),
-  # or a remote OpenAI-compatible /v1 URL.
-  embeddings: "fastembed"
+  backend: hindsight
+  port: 8890               # Hindsight's default 8888 is taken by the OTel collector
+  token: "hs_your-token"   # echo "hs_$(openssl rand -hex 24)"
+  bank: agent-sandbox      # one shared bank; each agent's writes are tagged agent:<type>
+  # What the bank is for — guides what gets extracted and kept.
+  mission: >
+    Shared long-term memory for the AI agents of the agent-sandbox: what they
+    learn about the environment, the codebases they work on, the people they
+    work for, and what worked or failed in past tasks.
+  # Model for fact extraction, consolidation and mental models (default: llm.model).
+  # llm_model: gemma
+  # max_completion_tokens: 16000    # keep under the model's output limit
+  # shared: an agent recalls from every agent's memories. agent: only its own
+  # (and untagged ones). Overridable per agent (memory.recall_scope).
+  recall_scope: shared
+  # Mental models shared by every agent. Per-agent ones go under
+  # `memory.mental_models` in config/agents/<type>.yaml and are built only from
+  # that agent's memories. Apply changes with `sandbox-ctl memory apply`.
+  mental_models:
+    - id: environment
+      name: Sandbox environment
+      query: >
+        What should an agent know about the sandbox environment it runs in:
+        available tools, network and egress limits, services, conventions and
+        known pitfalls?
+    - id: user-preferences
+      name: User preferences
+      query: >
+        What are the preferences, standing instructions and working style of the
+        people the agents work for?
+    - id: lessons
+      name: Lessons learned
+      query: >
+        What approaches have worked or failed in past tasks, and what should be
+        done differently next time?

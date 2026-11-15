@@ -100,7 +100,9 @@ class OmpConfig:
         self.api_key = env.get("LLM_API_KEY", "sk-default")
         self.model = env.get("LLM_MODEL", "default-model")
         self.context_window = _env_int(env, "OMP_CONTEXT_WINDOW", 131072)
-        self.max_tokens = _env_int(env, "OMP_MAX_TOKENS", 16384)
+        # Input + this must fit the model's real window; 8192 leaves room for
+        # omp's prompt, the tool list and recalled memory even on a 32k model.
+        self.max_tokens = _env_int(env, "OMP_MAX_TOKENS", 8192)
         self.max_sessions = max(1, _env_int(env, "OMP_MAX_SESSIONS", 4))
         self.idle_timeout_s = _env_int(env, "OMP_IDLE_TIMEOUT_S", 1800)
         self.start_timeout_s = _env_int(env, "OMP_START_TIMEOUT_S", 120)
@@ -112,6 +114,12 @@ class OmpConfig:
         self.bridge_python = env.get("OMP_MCP_BRIDGE_PYTHON", "python3")
         self.bridge_script = env.get("OMP_MCP_BRIDGE_SCRIPT") or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "mcp_sse_bridge.py")
+        # Hindsight: the explicit memory tools, over MCP. (Recall before and
+        # retain after every turn is done by gateway_server.py for all harnesses.)
+        hs = (env.get("HINDSIGHT_ENABLED", "") or "").strip()
+        self.hindsight_url = (env.get("HINDSIGHT_URL", "") or "").rstrip("/") if hs in ("1", "true", "True") else ""
+        self.hindsight_token = env.get("HINDSIGHT_TOKEN", "")
+        self.hindsight_bank = env.get("HINDSIGHT_BANK", "") or "agent-sandbox"
         mnem = (env.get("MNEMOSYNE_ENABLED", "") or "").strip()
         self.mnemosyne_url = env.get("MNEMOSYNE_URL", "") if mnem not in ("", "0", "false", "False") else ""
         self.mnemosyne_token = env.get("MNEMOSYNE_TOKEN", "")
@@ -156,6 +164,23 @@ class OmpConfig:
 
     def mcp_config(self):
         """mcp.json content, or None when shared memory is off / unusable."""
+        if self.hindsight_url:
+            # Hindsight's per-bank MCP endpoint (streamable HTTP), through the
+            # stdio bridge like mnemosyne below.
+            env = {}
+            if self.hindsight_token:
+                env["MCP_BRIDGE_AUTHORIZATION"] = f"Bearer {self.hindsight_token}"
+            return {
+                "mcpServers": {
+                    "memory": {
+                        "type": "stdio",
+                        "command": self.bridge_python,
+                        "args": [self.bridge_script, "--http",
+                                 f"{self.hindsight_url}/mcp/{self.hindsight_bank}/"],
+                        "env": env,
+                    }
+                }
+            }
         if not self.mnemosyne_url:
             return None
         if not self.mnemosyne_token:

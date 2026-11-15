@@ -88,7 +88,11 @@ drop_stale_pidfile() {
     rm -f "${pidfile}"
 }
 
-if [[ "${MEMORY_ENABLED:-0}" == "1" && -x "${STATE_DIR}/mnemosyne/venv/bin/mnemosyne" ]]; then
+if [[ "${MEMORY_ENABLED:-0}" == "1" && "${MEMORY_BACKEND:-mnemosyne}" == "hindsight" \
+      && -x "${STATE_DIR}/hindsight/venv/bin/hindsight-api" ]]; then
+    "${SANDBOX_ROOT}/bin/sandbox-ctl" memory start \
+        || log_warn "Hindsight failed to start — see ${LOG_DIR}/hindsight.log"
+elif [[ "${MEMORY_ENABLED:-0}" == "1" && -x "${STATE_DIR}/mnemosyne/venv/bin/mnemosyne" ]]; then
     drop_stale_pidfile "${STATE_DIR}/mnemosyne/mnemosyne.pid" mnemosyne
     "${SANDBOX_ROOT}/bin/sandbox-ctl" mnemosyne start \
         || log_warn "mnemosyne failed to start — see ${LOG_DIR}/mnemosyne.log"
