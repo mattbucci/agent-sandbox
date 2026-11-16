@@ -188,7 +188,7 @@ vm_restore() {
     novnc_port=$(jq -r '.novnc_port' "${info_file}")
     old_pid=$(jq -r '.firecracker_pid' "${info_file}")
 
-    if [[ ! -f "${SANDBOX_ROOT}/config/agents/${agent_type}.yaml" ]]; then
+    if ! agent_type_exists "${agent_type}"; then
         log_warn "Skipping ${INSTANCE_ID}: agent type '${agent_type}' no longer exists"
         return 1
     fi

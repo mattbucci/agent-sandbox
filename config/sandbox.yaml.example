@@ -1,3 +1,6 @@
+# This host's settings and credentials. Never committed. Agents, presets and the
+# settings you want under version control go in config/local/ instead
+# (docs/local-config.md); this file is laid over config/local/sandbox.yaml.
 llm:
   # LAN LLM router (OpenAI-compatible). No auth required; placeholder key.
   # Aliases: gemma (default generalist, multimodal), qwen38 (code), smart, council.

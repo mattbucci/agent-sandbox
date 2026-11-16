@@ -100,6 +100,22 @@ PY
     check "customize.sh for ${agent} carries the pins" grep -q '^fetch_verified()' "${WORK}/customize-${agent}.sh"
 done
 
+echo "== local config overlay"
+check "local agents, overrides and presets (test/test_local_config.py)" \
+    python3 "${SANDBOX_ROOT}/test/test_local_config.py"
+(
+    export SANDBOX_LOCAL_CONFIG="${WORK}/local"
+    mkdir -p "${SANDBOX_LOCAL_CONFIG}/agents"
+    printf 'agent: {type: zz-private, name: Private}\n' > "${SANDBOX_LOCAL_CONFIG}/agents/zz-private.yaml"
+    : > "${SANDBOX_LOCAL_CONFIG}/agents/coder.yaml"
+    list_agent_types > "${WORK}/types.txt"
+    grep -qx zz-private "${WORK}/types.txt" && [[ "$(grep -cx coder "${WORK}/types.txt")" == "1" ]] \
+        && agent_type_exists zz-private && ! agent_type_exists zz-missing
+) && ok "shell helpers see local agents once each" || fail "shell helpers see local agents once each"
+ignored="$(cd "${SANDBOX_ROOT}" && git check-ignore -q config/local/agents/x.yaml 2>/dev/null \
+    && git check-ignore -q config/sandbox.yaml 2>/dev/null && echo yes || true)"
+[[ "${ignored}" == "yes" || ! -d "${SANDBOX_ROOT}/.git" ]] && ok "private config is gitignored" || fail "private config is gitignored"
+
 echo "== memory config"
 check "memory backend, access policy + mental-model plan (test/test_memory_config.py)" \
     python3 "${SANDBOX_ROOT}/test/test_memory_config.py"

@@ -11,6 +11,10 @@ rootfs/agents/*/rootfs.ext4
 rootfs/agents/*/images/
 build/
 
+# Private configuration (docs/local-config.md)
+config/local/
+config/sandbox.yaml.bak-*
+
 # Secrets
 config/sandbox.yaml
 config/sandbox.conf
