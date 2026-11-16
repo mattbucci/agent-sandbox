@@ -1,9 +1,14 @@
 llm:
   # LAN LLM router (OpenAI-compatible). No auth required; placeholder key.
-  # Aliases: gemma (default, multimodal), north (reasoning/code), smart, council.
+  # Aliases: gemma (default generalist, multimodal), qwen38 (code), smart, council.
   api_base: "http://simple-llm-router.ph.ca:8080/v1"
   api_key: "sk-lan"
   model: "gemma"
+  # Optional limits of the served model. omp is told both; hermes requests
+  # max_output_tokens (its default of 65536 is more than most servers accept).
+  # Overridable per agent under vm: (see config/agents/coder.yaml).
+  # context_window: 131072
+  # max_output_tokens: 8192
 
 vm_defaults:
   vcpus: 4
@@ -88,7 +93,7 @@ gateway:
     researcher:  { api_server_key: "", approval: true }
     security:    { api_server_key: "", approval: true }
     # Coding specialist pinned to a code model. config/agents/coder.yaml sets
-    # `vm.model: north`, so this agent's LLM_MODEL is the North-Mini-Code model
+    # `vm.model: qwen38`, so this agent's LLM_MODEL is the code model
     # on the LAN router while every other agent stays on the global llm.model.
     # Route coding tasks here (e.g. `ygg hermes back <ref> --agent coder`).
     coder:       { api_server_key: "", approval: true }
@@ -98,13 +103,65 @@ gateway:
     # real LLM alias before forwarding, so the container's API server accepts it.
     hermes:      { api_server_key: "hgw_your-gateway-token-here", model: "gemma", approval: true }
 
-# Mnemosyne shared agent-memory service (MCP over SSE). Runs on the sandbox
-# HOST (bin/sandbox-ctl mnemosyne ...), bound 0.0.0.0:<port>; agent VMs reach it
-# at http://mnemosyne.host:<port>/sse (mnemosyne.host -> the VM's gateway IP).
+# Agent long-term memory. Runs on the sandbox HOST (bin/sandbox-ctl memory ...);
+# agent VMs reach it at their gateway IP.
+#
+# backend: hindsight — hierarchical memory (https://github.com/vectorize-io/hindsight):
+#     mental models   standing questions kept answered, declared below and per agent
+#     observations    beliefs consolidated automatically from facts
+#     facts           world facts + each agent's experiences, extracted from turns
+#   Every agent turn is recalled-for before it runs and retained after it; agents
+#   also get explicit recall / retain / reflect tools. See docs/memory.md.
+# backend: mnemosyne — the earlier flat MCP store (default when `backend` is
+#   absent; port 8077, `sandbox-ctl mnemosyne ...`, `embeddings:` option).
 memory:
   enabled: true
-  port: 8077
-  token: "mnem_your-token"
-  # Embedding backend: "fastembed" (local), "none" (FTS5 keyword-only),
-  # or a remote OpenAI-compatible /v1 URL.
-  embeddings: "fastembed"
+  backend: hindsight
+  port: 8890               # Hindsight's default 8888 is taken by the OTel collector
+  token: "hs_your-token"   # echo "hs_$(openssl rand -hex 24)"
+  bank: agent-sandbox      # one shared bank; each agent's writes are tagged agent:<type>
+  # What the bank is for — guides what gets extracted and kept.
+  mission: >
+    Shared long-term memory for the AI agents of the agent-sandbox: what they
+    learn about the environment, the codebases they work on, the people they
+    work for, and what worked or failed in past tasks.
+  # Model for fact extraction, consolidation and mental models (default: llm.model).
+  # llm_model: gemma
+  # max_completion_tokens: 16000    # keep under the model's output limit
+  # Who can reach what. Each agent has its own credential and the service
+  # enforces this policy (docs/memory.md#who-can-reach-what). Words: own (the
+  # agent's tag), shared (untagged), all, an agent type, or any tag.
+  # Default for every agent; override per agent under `memory.access` in its YAML.
+  access:
+    read: [all]              # e.g. [own, shared] to keep agents out of each other's memories
+    write: [own]             # [] makes an agent read-only
+  # Additional banks; grant them per agent with `memory.banks` in its YAML.
+  # banks:
+  #   advisories:
+  #     mission: Security advisories and how they were handled.
+  #     mental_models:
+  #       - id: open-cves
+  #         name: Open CVEs
+  #         query: Which vulnerabilities are still open, and what is blocking each?
+  # Mental models. Each takes optional `visible_to` (who may read it) and
+  # `sources` (whose memories it is written from): `all` or a list of agents.
+  # Here both default to all; ones under `memory.mental_models` in
+  # config/agents/<type>.yaml default to that agent. Apply with
+  # `sandbox-ctl memory apply`; inspect with `sandbox-ctl memory access`.
+  mental_models:
+    - id: environment
+      name: Sandbox environment
+      query: >
+        What should an agent know about the sandbox environment it runs in:
+        available tools, network and egress limits, services, conventions and
+        known pitfalls?
+    - id: user-preferences
+      name: User preferences
+      query: >
+        What are the preferences, standing instructions and working style of the
+        people the agents work for?
+    - id: lessons
+      name: Lessons learned
+      query: >
+        What approaches have worked or failed in past tasks, and what should be
+        done differently next time?

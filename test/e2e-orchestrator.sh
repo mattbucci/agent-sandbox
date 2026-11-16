@@ -27,7 +27,7 @@
 #   YGG              path to the ygg binary            (default: PATH, then target/release)
 #   GEMMA_AGENT      a gemma-backed agent to hit       (default: feature-dev)
 #   NORTH_AGENT      the north/cohere coding agent      (default: coder)
-#   NORTH_MODEL      expected LLM model for NORTH_AGENT (default: north)
+#   NORTH_MODEL      expected LLM model for NORTH_AGENT (default: qwen38)
 #   TRACES_FILE      OTel file-exporter path            (default: /var/log/otel/traces.jsonl)
 #   TASK_TIMEOUT_S   per-task wait budget               (default: 150)
 #   SKIP_SCHEDULED / SKIP_TRACING / SKIP_NORTH   set to 1 to skip a section
@@ -43,7 +43,7 @@ GATEWAY_JSON="${SANDBOX_ROOT}/state/gateway/gateway.json"
 GATEWAY_URL="${HERMES_GATEWAY_URL:-http://127.0.0.1:8642}"
 GEMMA_AGENT="${GEMMA_AGENT:-feature-dev}"
 NORTH_AGENT="${NORTH_AGENT:-coder}"
-NORTH_MODEL="${NORTH_MODEL:-north}"
+NORTH_MODEL="${NORTH_MODEL:-qwen38}"
 TRACES_FILE="${TRACES_FILE:-/var/log/otel/traces.jsonl}"
 TASK_TIMEOUT_S="${TASK_TIMEOUT_S:-150}"
 

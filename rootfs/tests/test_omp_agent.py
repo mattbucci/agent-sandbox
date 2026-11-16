@@ -82,6 +82,23 @@ class OmpAgentTest(unittest.IsolatedAsyncioTestCase):
         self.make_agent(MNEMOSYNE_ENABLED="1", MNEMOSYNE_URL="http://mnemosyne.host:8077/sse")
         self.assertFalse(os.path.exists(os.path.join(agent.config.agent_dir, "mcp.json")))
 
+    def test_hindsight_tools_use_the_per_bank_mcp_endpoint_through_the_bridge(self):
+        agent = self.make_agent(HINDSIGHT_ENABLED="1", HINDSIGHT_URL="http://10.0.0.1:8890/",
+                                HINDSIGHT_TOKEN="hs_x", HINDSIGHT_BANK="agent-sandbox")
+        server = json.load(open(os.path.join(agent.config.agent_dir, "mcp.json")))["mcpServers"]["memory"]
+        self.assertEqual(server["type"], "stdio")
+        self.assertEqual(server["args"][1:], ["--http", "http://10.0.0.1:8890/mcp/agent-sandbox/"])
+        self.assertEqual(server["env"]["MCP_BRIDGE_AUTHORIZATION"], "Bearer hs_x")
+        self.assertNotIn("hs_x", " ".join(server["args"]))
+
+    def test_model_limits_come_from_the_sandbox_config(self):
+        models = lambda agent: json.load(open(os.path.join(agent.config.agent_dir, "models.yml")))["providers"]["sandbox"]["models"][0]
+        m = models(self.make_agent(LLM_CONTEXT_WINDOW="32768", LLM_MAX_OUTPUT_TOKENS="4096"))
+        self.assertEqual((m["contextWindow"], m["maxTokens"]), (32768, 4096))
+        m = models(self.make_agent(LLM_MAX_OUTPUT_TOKENS="4096", OMP_MAX_TOKENS="2048"))
+        self.assertEqual(m["maxTokens"], 2048)            # OMP_* overrides for omp alone
+        self.assertEqual(models(self.make_agent())["maxTokens"], 8192)
+
     def test_command_line(self):
         cmd = self.make_agent().config.command("abc")
         self.assertEqual(cmd[:3], [FAKE_OMP, "--mode", "rpc"])

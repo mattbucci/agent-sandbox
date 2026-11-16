@@ -138,10 +138,10 @@ How it maps (`rootfs/overlay/opt/agent/omp_agent.py`):
 |---------|----------|
 | Process model | One `omp --mode rpc` process per `X-Hermes-Session-Id`, driven over its JSONL stdio protocol. At most `OMP_MAX_SESSIONS` (default 4) live at once; idle ones are closed after `OMP_IDLE_TIMEOUT_S` (default 1800). |
 | Conversation | omp keeps its own history, so only the newest user message is sent each turn. Each session has its own `--session-dir` and starts with `--continue`: an evicted or crashed process resumes the same conversation from disk (`~/.omp/gateway-sessions/`). |
-| Model | A single custom provider (`sandbox`) pointing at `LLM_API_BASE`, model `LLM_MODEL`, written to `~/.omp/agent/models.yml` at start. `OMP_CONTEXT_WINDOW` (default 131072) and `OMP_MAX_TOKENS` set the advertised limits. |
+| Model | A single custom provider (`sandbox`) pointing at `LLM_API_BASE`, model `LLM_MODEL`, written to `~/.omp/agent/models.yml` at start. The advertised limits come from `llm.context_window` / `llm.max_output_tokens` (or the agent's `vm:` overrides), compiled to `LLM_CONTEXT_WINDOW` / `LLM_MAX_OUTPUT_TOKENS`; `OMP_CONTEXT_WINDOW` (default 131072) and `OMP_MAX_TOKENS` override them. |
 | System prompt | omp's own coding prompt, with the agent's compiled `/etc/agent/system-prompt.md` appended. |
 | Approvals | omp runs with `--approval-mode write`, so every exec-tier tool call asks first and the adapter answers. Outside a run it approves (the VM is the sandbox). Inside a run, a shell command matching the dangerous-command patterns is put to the client through the runs API — the same policy as the `deepagents` harness. |
-| Memory | With `memory.enabled`, the shared mnemosyne server is configured as an MCP server reached through `/opt/agent/mcp_sse_bridge.py` (stdio ⇄ SSE), and omp waits for its tools at startup. Tools appear as `mcp__mnemosyne_*`. |
+| Memory | Recall before and retain after each turn happen in the in-VM server for every harness ([Agent memory](memory.md)). The explicit tools reach omp as an MCP server through `/opt/agent/mcp_sse_bridge.py` (stdio ⇄ HTTP): `mcp__memory_*` with Hindsight, `mcp__mnemosyne_*` with mnemosyne. omp waits for them at startup. |
 | Tracing | omp exports OTLP itself from `OTEL_EXPORTER_OTLP_ENDPOINT` (set by `start.sh`). |
 | Failures | Provider retries are capped (`OMP_MAX_RETRIES`, default 2) so a dead backend surfaces as an error instead of holding the agent's slot through omp's default multi-minute backoff. A cancelled run or stream aborts the turn in omp and keeps the process. |
 
@@ -523,7 +523,7 @@ LLM router; the `gateway` block defines the router itself.
 llm:
   api_base: "http://simple-llm-router.ph.ca:8080/v1"
   api_key: "sk-lan"          # placeholder; LAN-trusted
-  model: "gemma"             # aliases: gemma (default), north, smart, council
+  model: "gemma"             # aliases: gemma (default), qwen38, smart, council
 
 gateway:
   enabled: true
@@ -726,6 +726,9 @@ not scoped for the agent returns `403`; and a request for an agent with no runni
 VM returns `502`.
 
 ## Agent memory (mnemosyne)
+
+> This section describes the `memory.backend: mnemosyne` store. The current
+> default for new setups is Hindsight — see [Agent memory](memory.md).
 
 Durable agent memory is part of the hosted agent surface (see
 [ADR 0002](adr/0002-agent-memory-hosted-surface.md)). We host

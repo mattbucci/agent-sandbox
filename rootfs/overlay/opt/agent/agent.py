@@ -183,6 +183,57 @@ async def _load_mcp_tools():
         return []
 
 
+def _memory_tools():
+    """Explicit long-term-memory tools backed by Hindsight (see memory.py).
+
+    Recall-before and retain-after every turn already happen in
+    gateway_server.py; these let the agent reach into memory deliberately —
+    look something up mid-task, record a lesson, or ask for a synthesized
+    answer. Returns [] when memory is off or the tools cannot be built.
+    """
+    try:
+        from memory import get_memory
+        memory = get_memory()
+        if not memory.enabled:
+            return []
+        from langchain_core.tools import tool
+
+        @tool
+        def memory_recall(query: str) -> str:
+            """Search long-term memory (facts, the agent's past experiences and
+            consolidated observations from earlier sessions) for `query`."""
+            try:
+                results = memory.recall(query, max_tokens=1500)
+            except Exception as e:  # noqa: BLE001
+                return f"memory unavailable: {e}"
+            if not results:
+                return "No relevant memories."
+            return "\n".join(f"- [{r['type']} {r['date']}] {r['text']}" for r in results)
+
+        @tool
+        def memory_retain(content: str) -> str:
+            """Store something worth remembering in future sessions: a decision,
+            a lesson learned, a fact about the environment or the user's
+            preferences. Write complete sentences with names and dates."""
+            ok = memory.retain(content, context=f"note recorded by the {memory.agent_type} agent")
+            return "Stored (facts are extracted in the background)." if ok else "Nothing stored."
+
+        @tool
+        def memory_reflect(question: str) -> str:
+            """Ask long-term memory to reason over everything it knows and
+            answer `question`. Slow (can take minutes); use memory_recall for
+            simple lookups."""
+            try:
+                return memory.reflect(question) or "No answer."
+            except Exception as e:  # noqa: BLE001
+                return f"memory unavailable: {e}"
+
+        return [memory_recall, memory_retain, memory_reflect]
+    except Exception as e:  # noqa: BLE001 — the agent must build without memory
+        logger.warning(f"memory tools unavailable: {e}")
+        return []
+
+
 def create_agent(callbacks=None):
     """Create and configure the DeepAgents agent.
 
@@ -247,8 +298,9 @@ def create_agent(callbacks=None):
         ),
         system_prompt=system_prompt,
     )
-    if mcp_tools:
-        deep_agent_kwargs["tools"] = mcp_tools
+    tools = list(mcp_tools) + _memory_tools()
+    if tools:
+        deep_agent_kwargs["tools"] = tools
 
     agent = create_deep_agent(**deep_agent_kwargs)
 

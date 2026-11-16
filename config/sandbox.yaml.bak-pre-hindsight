@@ -1,0 +1,120 @@
+llm:
+  # LAN LLM router (OpenAI-compatible). No auth required; placeholder key.
+  # Aliases: gemma (default, multimodal), north (reasoning/code), smart, council.
+  api_base: "http://simple-llm-router.ph.ca:8080/v1"
+  api_key: "sk-lan"
+  model: "gemma"
+
+vm_defaults:
+  vcpus: 4
+  mem_mb: 8192
+
+network:
+  host_iface: "enp5s0"
+  subnet_prefix: "10.0"
+  novnc_base_port: 6080
+  ssh_base_port: 2200
+
+firecracker:
+  bin: "/usr/local/bin/firecracker"
+  jailer: "/usr/local/bin/jailer"
+
+rootfs:
+  # Default size for base.ext4 and (after cloning) each agent rootfs.
+  size_mb: 8192
+  # Per-agent rootfs size overrides, in MB. The ext4 image is sparse, so a
+  # larger size costs nothing on disk until actually written. cmd_build_agent
+  # grows + resize2fs's the cloned base to this size before baking image tars.
+  #
+  # hermes needs far more than the 8 GB base: cmd_build_agent bakes the
+  # multi-GB hermes-agent tar into the rootfs, and at boot run-hermes.sh
+  # `docker load`s it into /var/lib/docker on this SAME filesystem BEFORE
+  # deleting the tar — so peak usage is base image + tar + loaded image
+  # simultaneously, on top of the XFCE/chromium/docker the base already carries.
+  per_agent:
+    hermes: 24576
+
+squid:
+  http_port: 3128
+  https_port: 3129
+
+# Hermes Gateway router — exposes sandboxed agents to hermes-webui over an
+# OpenAI-compatible API. Compiled to state/gateway/gateway.json by compile-gateway.
+gateway:
+  enabled: true
+  bind: "0.0.0.0"          # host LAN bind for the router
+  port: 8642
+  default_agent: "feature-dev"
+  vm_gateway_port: 8642    # in-VM OpenAI server port (inside each VM)
+
+  # Scheduling, async tasks, observability and the ops dashboard. Every key
+  # below is OPTIONAL: defaults live only in the Go router (applyDefaults()),
+  # and compile-gateway copies these blocks into gateway.json verbatim when
+  # present — omit a block entirely and the router behaves the same.
+  scheduler:
+    default_concurrency: 1          # per-agent simultaneous runs, sync+async combined
+    sync_queue_max: 4               # waiting sync requests per agent before 429
+    sync_queue_wait_s: 120          # max sync queue wait before 503
+    async_starvation_after_s: 300   # aging: async slot request jumps sync FIFO after this
+    retry_after_s: 15               # Retry-After on 429/503
+  tasks:
+    enabled: true
+    dir: ""                         # "" -> <state_dir>/gateway/tasks
+    default_timeout_s: 3600         # per attempt
+    default_deadline_s: 86400
+    default_max_attempts: 2
+    retry_on_partial: false
+    retry_backoff_base_s: 10        # backoff(n)=min(base*2^(n-1), cap)
+    retry_backoff_cap_s: 600
+    idle_timeout_s: 900             # no SSE bytes this long -> attempt fails
+    vm_unavailable_retry_s: 30
+    retention_h: 168
+    max_records: 2000
+    max_pending_per_agent: 200
+  observability:
+    otlp_endpoint: "http://127.0.0.1:4318"   # "" disables span export (traceparent still propagated)
+    sample_ratio: 1.0
+    log_format: "json"              # json|text
+    traces_file: "/var/log/otel/traces.jsonl"
+    squid_access_log: "/var/log/squid/access.log"
+  dashboard:
+    enabled: true
+    # Dedicated ops bearers for /dashboard/api/* (generate with:
+    # echo "hgwd_$(openssl rand -hex 24)"). Empty list => APIs 403 fail-closed.
+    tokens: ["hgwd_535974ae4e60dae1c599ace10ca6cee6d121f8311dd89509"]
+
+  tokens:
+    # North-gate bearer the router requires from incoming webui requests.
+    - name: "hermes-webui"
+      token: "hgw_1215be916151be10aac8da679ab15b752deb2033ccdad5cd"
+      agents: ["*"]
+  agents:                  # exposed agent types + downstream per-VM key (may be "")
+    # Optional per-agent `concurrency` overrides scheduler.default_concurrency
+    # (0/absent = default). Optional per-agent `approval: true` advertises the
+    # runs API (interactive dangerous-command approval) on /v1/capabilities so
+    # the webui uses the runs path for that agent. All deepagents agents now
+    # implement the runs lifecycle in-VM; hermes implements it natively.
+    feature-dev: { api_server_key: "", concurrency: 1, approval: true }
+    debugger:    { api_server_key: "", approval: true }
+    devops:      { api_server_key: "", approval: true }
+    researcher:  { api_server_key: "", approval: true }
+    security:    { api_server_key: "", approval: true }
+    # Coding specialist pinned to North-Mini-Code (cohere) via config/agents/coder.yaml.
+    coder:       { api_server_key: "", approval: true }
+    # Real NousResearch/hermes-agent v2026.6.19 (Docker, pre-baked into the VM).
+    # Its in-VM API server requires this bearer; the router presents it downstream.
+    # `model` rewrites the outgoing OpenAI model field (the agent id "hermes") to a
+    # real LLM alias before forwarding, so the container's API server accepts it.
+    # The container implements the runs API natively -> approval: true.
+    hermes:      { api_server_key: "hgw_1215be916151be10aac8da679ab15b752deb2033ccdad5cd", model: "gemma", approval: true }
+
+# Mnemosyne shared agent-memory service (MCP over SSE). Runs on the sandbox
+# HOST (bin/sandbox-ctl mnemosyne ...), bound 0.0.0.0:<port>; agent VMs reach it
+# at http://mnemosyne.host:<port>/sse (mnemosyne.host -> the VM's gateway IP).
+memory:
+  enabled: true
+  port: 8077
+  token: "mnem_429c74d10b8b3fc647f096b535caea0c37bfbb121e99a2e7"
+  # Embedding backend: "fastembed" (local), "none" (FTS5 keyword-only),
+  # or a remote OpenAI-compatible /v1 URL.
+  embeddings: "fastembed"

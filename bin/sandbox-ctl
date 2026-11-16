@@ -759,6 +759,252 @@ mnemosyne_nft_remove() {
     return 0
 }
 
+# --- Memory service (memory.backend) ---
+# "hindsight": hierarchical memory — facts, consolidated observations, and the
+# mental models declared in config. "mnemosyne": the earlier flat MCP store.
+# Both run on the HOST; VMs reach them at their gateway IP, which lands in
+# vm_filter's INPUT chain, so the port needs an explicit allow.
+memory_nft_allow() {
+    local port="$1"
+    if ! nft list table ip vm_filter >/dev/null 2>&1; then
+        log_warn "nftables table 'ip vm_filter' not found; run 'sandbox-ctl setup' first."
+        return 0
+    fi
+    nft -a list chain ip vm_filter input 2>/dev/null | grep -q 'comment "memory"' && return 0
+    # 'insert', not 'add': the chain ends with a drop for tap-vm*, so an
+    # appended accept would never match.
+    nft insert rule ip vm_filter input \
+        iifname "tap-vm*" tcp dport "${port}" accept comment "\"memory\""
+}
+
+memory_nft_remove() {
+    nft -a list chain ip vm_filter input 2>/dev/null | \
+        grep 'comment "memory"' | grep -oP 'handle \K[0-9]+' | \
+        while read -r handle; do
+            nft delete rule ip vm_filter input handle "${handle}" 2>/dev/null || true
+        done || true
+}
+
+# The memory service runs as the checkout's owner, not root: Hindsight's
+# embedded PostgreSQL refuses to run as root, and nothing it does needs it.
+memory_user() {
+    stat -c %U "${SANDBOX_ROOT}"
+}
+
+memory_as_user() {
+    local user
+    user="$(memory_user)"
+    if [[ "$(id -un)" == "${user}" ]]; then
+        "$@"
+    else
+        sudo -u "${user}" -H "$@"
+    fi
+}
+
+cmd_memory() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    if [[ "${MEMORY_BACKEND:-mnemosyne}" != "hindsight" ]]; then
+        case "${subcmd}" in
+            help|--help|-h) ;;
+            *)
+                # Legacy backend: same verbs, served by the mnemosyne command.
+                log_info "memory.backend is '${MEMORY_BACKEND:-mnemosyne}' — delegating to 'sandbox-ctl mnemosyne ${subcmd}'."
+                cmd_mnemosyne "${subcmd}" "$@"
+                return
+                ;;
+        esac
+    fi
+
+    local hs_dir="${STATE_DIR}/hindsight"
+    local venv_dir="${hs_dir}/venv"
+    local home_dir="${hs_dir}/home"          # embedded PostgreSQL + model cache
+    local pidfile="${hs_dir}/hindsight.pid"
+    local hs_bin="${venv_dir}/bin/hindsight-api"
+    local hs_log="${LOG_DIR}/hindsight.log"
+    local port="${HINDSIGHT_PORT:-8890}"
+    local token="${HINDSIGHT_ADMIN_TOKEN:-}"   # admin; agents get derived tokens
+    local policy_file="${hs_dir}/policy.json"
+
+    hindsight_pid() {
+        local pid
+        pid=$(cat "${pidfile}" 2>/dev/null || true)
+        if pid_alive "${pid}" && grep -qa hindsight-api "/proc/${pid}/cmdline" 2>/dev/null; then
+            echo "${pid}"
+        fi
+    }
+
+    hindsight_wait_ready() {
+        local i
+        for i in $(seq 1 90); do
+            curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${port}/health" 2>/dev/null && return 0
+            [[ -n "$(hindsight_pid)" ]] || return 1
+            sleep 2
+        done
+        return 1
+    }
+
+    case "${subcmd}" in
+        install)
+            command -v uv &>/dev/null || { log_error "'uv' is required to install Hindsight."; exit 1; }
+            memory_as_user mkdir -p "${hs_dir}" "${home_dir}" "${LOG_DIR}"
+            if [[ ! -x "${venv_dir}/bin/python" ]]; then
+                log_info "Creating Hindsight venv (uv, python 3.12) at ${venv_dir}..."
+                memory_as_user uv venv --python 3.12 "${venv_dir}"
+            fi
+            log_info "Installing hindsight-api ${HINDSIGHT_VERSION} (bundles local embedding + reranker models; several GB)..."
+            memory_as_user uv pip install --python "${venv_dir}/bin/python" \
+                --exclude-newer "${HINDSIGHT_EXCLUDE_NEWER}" \
+                "hindsight-api==${HINDSIGHT_VERSION}"
+            log_ok "Hindsight installed: $("${venv_dir}/bin/python" -c 'import importlib.metadata as m; print(m.version("hindsight-api"))')"
+            ;;
+
+        start)
+            require_root "memory start"
+            [[ -x "${hs_bin}" ]] || cmd_memory install
+
+            if [[ -z "${token}" ]]; then
+                log_error "No memory token configured. Set memory.token in config/sandbox.yaml,"
+                log_error "then run 'sandbox-ctl config compile' before starting memory."
+                exit 1
+            fi
+            if [[ -n "$(hindsight_pid)" ]]; then
+                log_warn "Hindsight already running (PID $(hindsight_pid))."
+                memory_nft_allow "${port}"
+                return 0
+            fi
+
+            memory_as_user mkdir -p "${home_dir}" "${LOG_DIR}"
+            touch "${hs_log}" && chown "$(memory_user)" "${hs_log}"
+
+            # The service authenticates against the policy file, so it has to
+            # exist before the first request (including our own readiness apply).
+            memory_as_user python3 "${SANDBOX_ROOT}/lib/agentconf.py" memory-policy
+
+            # LLM: the sandbox's own router, used for fact extraction,
+            # consolidation into observations, and writing mental models. The
+            # completion caps keep requests inside what a local model accepts
+            # (Hindsight's defaults assume a hosted model's 64k output limit).
+            local max_out="${HINDSIGHT_MAX_COMPLETION_TOKENS:-16000}"
+            local run_env=(
+                "HOME=${home_dir}"
+                "HINDSIGHT_API_LLM_PROVIDER=openai"
+                "HINDSIGHT_API_LLM_BASE_URL=${LLM_API_BASE}"
+                "HINDSIGHT_API_LLM_API_KEY=${LLM_API_KEY}"
+                "HINDSIGHT_API_LLM_MODEL=${HINDSIGHT_LLM_MODEL:-${LLM_MODEL}}"
+                "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=${max_out}"
+                "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS=${max_out}"
+                "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=${max_out}"
+                # Writing a mental model is a multi-step LLM task; a local model
+                # sharing the router with the agents needs well over the
+                # default 300s, after which Hindsight cancels the refresh.
+                "HINDSIGHT_API_REFLECT_WALL_TIMEOUT=${HINDSIGHT_REFLECT_WALL_TIMEOUT:-1800}"
+                # Per-agent access control (lib/hindsight_ext): every request
+                # needs a bearer token — the master token is the admin, each
+                # agent has its own derived one — and the policy file decides
+                # which banks, tags and mental models that principal reaches.
+                "PYTHONPATH=${SANDBOX_ROOT}/lib/hindsight_ext"
+                "HINDSIGHT_API_TENANT_EXTENSION=sandbox_memory_policy:SandboxTenantExtension"
+                "HINDSIGHT_API_TENANT_POLICY_FILE=${policy_file}"
+                "HINDSIGHT_API_OPERATION_VALIDATOR_EXTENSION=sandbox_memory_policy:SandboxPolicyValidator"
+                "HINDSIGHT_API_OPERATION_VALIDATOR_POLICY_FILE=${policy_file}"
+                "HINDSIGHT_API_MCP_INSTRUCTIONS=This is the agent sandbox's shared long-term memory. Retain durable facts, decisions, lessons and user preferences in complete sentences; do not retain secrets or credentials."
+            )
+
+            log_info "Starting Hindsight on 0.0.0.0:${port} as $(memory_user) (LLM: ${HINDSIGHT_LLM_MODEL:-${LLM_MODEL}})..."
+            memory_as_user bash -c 'cd "$1" && shift && exec nohup env "$@"' _ "${hs_dir}" \
+                "${run_env[@]}" "${hs_bin}" --host 0.0.0.0 --port "${port}" >> "${hs_log}" 2>&1 &
+            sleep 2
+            local pid
+            pid=$(pgrep -u "$(memory_user)" -f "hindsight-api --host 0.0.0.0 --port ${port}" | head -1 || true)
+            if [[ -z "${pid}" ]]; then
+                log_error "Hindsight did not start — see ${hs_log}"
+                exit 1
+            fi
+            echo "${pid}" > "${pidfile}"
+
+            log_info "Waiting for Hindsight to be ready (first start loads models and creates the database)..."
+            if ! hindsight_wait_ready; then
+                log_error "Hindsight is not answering on :${port} — see ${hs_log}"
+                exit 1
+            fi
+            memory_nft_allow "${port}"
+            log_ok "Hindsight started (PID ${pid}), API on http://0.0.0.0:${port}"
+
+            # Bring the declared bank + mental models up to date.
+            cmd_memory apply || log_warn "memory apply failed — run 'sandbox-ctl memory apply' once Hindsight is healthy."
+            ;;
+
+        stop)
+            require_root "memory stop"
+            local pid
+            pid="$(hindsight_pid)"
+            if [[ -n "${pid}" ]]; then
+                kill "${pid}" 2>/dev/null || true
+                local i
+                for i in $(seq 1 20); do pid_alive "${pid}" || break; sleep 1; done
+                pid_alive "${pid}" && kill -9 "${pid}" 2>/dev/null || true
+                log_ok "Stopped Hindsight (PID ${pid})."
+            else
+                log_info "Hindsight not running."
+            fi
+            rm -f "${pidfile}"
+            memory_nft_remove
+            ;;
+
+        apply)
+            # Write the per-agent access policy (picked up by the running
+            # service without a restart) and sync the banks and mental models
+            # declared in sandbox.yaml and the agent YAMLs. --dry-run prints the
+            # plan without changing anything.
+            memory_as_user python3 "${SANDBOX_ROOT}/lib/agentconf.py" memory-apply "$@"
+            ;;
+
+        access)
+            # Who may read and write what, and which mental models each agent sees.
+            python3 "${SANDBOX_ROOT}/lib/agentconf.py" memory-access "$@"
+            ;;
+
+        status)
+            local pid state="STOPPED"
+            pid="$(hindsight_pid)"
+            [[ -n "${pid}" ]] && state="RUNNING (PID ${pid})"
+            echo "=== Memory (Hindsight ${HINDSIGHT_VERSION}) ==="
+            echo ""
+            echo "  Service:  ${state}"
+            echo "  Listen:   0.0.0.0:${port}   (VMs: http://<gateway-ip>:${port})"
+            echo "  Bank:     ${HINDSIGHT_BANK:-agent-sandbox}"
+            echo "  LLM:      ${HINDSIGHT_LLM_MODEL:-${LLM_MODEL}} via ${LLM_API_BASE}"
+            echo "  Data:     ${home_dir}"
+            if [[ -n "${pid}" ]]; then
+                local bank_url="http://127.0.0.1:${port}/v1/default/banks/${HINDSIGHT_BANK:-agent-sandbox}"
+                local auth=(-H "Authorization: Bearer ${token}")
+                echo ""
+                echo "  Hierarchy:"
+                curl -fsS --max-time 5 "${auth[@]}" "${bank_url}/mental-models?limit=100" 2>/dev/null \
+                    | jq -r '(.items // .) | "    mental models   \(length)" , (.[] | "      - \(.id)  [\((.tags // []) | join(",") | if . == "" then "shared" else . end)]\(if .is_stale then "  (stale)" else "" end)")' 2>/dev/null \
+                    || echo "    (bank not readable yet)"
+                curl -fsS --max-time 5 "${auth[@]}" "${bank_url}/stats" 2>/dev/null \
+                    | jq -r '"    observations    \(.nodes_by_fact_type.observation // 0)\n    world facts     \(.nodes_by_fact_type.world // 0)\n    experiences     \(.nodes_by_fact_type.experience // 0)\n    pending ops     \((.operations_by_status.processing // 0) + (.operations_by_status.pending // 0))   failed: \(.failed_operations // 0)"' 2>/dev/null || true
+            fi
+            ;;
+
+        *)
+            echo "Usage: sandbox-ctl memory <subcommand>"
+            echo ""
+            echo "  install     Create state/hindsight/venv and install the pinned hindsight-api"
+            echo "  start       Launch Hindsight, open the VM firewall, apply the declared mental models"
+            echo "  stop        Stop Hindsight and close the VM firewall"
+            echo "  status      Service state and the memory hierarchy's size"
+            echo "  apply       Write the access policy and sync banks + mental models (--dry-run to preview)"
+            echo "  access      Show each agent's bank/tag access and visible mental models ([agent])"
+            echo ""
+            echo "With memory.backend: mnemosyne these delegate to 'sandbox-ctl mnemosyne'."
+            ;;
+    esac
+}
+
 cmd_mnemosyne() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -979,6 +1225,7 @@ sentry-cli (guest)|SENTRY_CLI_VERSION||getsentry/sentry-cli
 omp (guest)|OMP_VERSION||can1357/oh-my-pi
 kubernetes apt (guest)|KUBERNETES_APT_SERIES||kubernetes/kubernetes
 mnemosyne|MNEMOSYNE_VERSION||
+hindsight|HINDSIGHT_VERSION||vectorize-io/hindsight
 hermes-agent|HERMES_AGENT_VERSION||NousResearch/hermes-agent
 ROWS
 }
@@ -1152,7 +1399,15 @@ Dependencies:
   versions verify          Re-download every pinned artifact, check its sha256
   deps lock                Regenerate the agent's hash-pinned requirements.lock
 
-Memory (shared mnemosyne MCP service):
+Memory (memory.backend: hindsight — facts, observations, mental models):
+  memory install           Create the venv + install the pinned hindsight-api
+  memory start             Launch Hindsight, open the VM firewall, apply mental models
+  memory stop              Stop Hindsight + close the VM firewall
+  memory status            Service state and the size of each memory layer
+  memory apply [--dry-run] Write the access policy; sync banks + mental models
+  memory access [agent]    Who may read/write what; mental models each agent sees
+
+Memory (legacy memory.backend: mnemosyne MCP service):
   mnemosyne install        Create venv + install mnemosyne-memory (prefers python3.12)
   mnemosyne start          Launch the MCP SSE server + open the VM firewall
   mnemosyne stop           Stop the server + close the VM firewall
@@ -1196,6 +1451,7 @@ case "${COMMAND}" in
     config)         cmd_config "$@" ;;
     gateway)        cmd_gateway "$@" ;;
     mnemosyne)      cmd_mnemosyne "$@" ;;
+    memory)         cmd_memory "$@" ;;
     network-status) cmd_network_status "$@" ;;
     cleanup)        cmd_cleanup "$@" ;;
     versions)       cmd_versions "$@" ;;
