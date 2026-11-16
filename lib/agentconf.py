@@ -36,6 +36,11 @@ CONFIG_DIR = SANDBOX_ROOT / "config"
 PRESETS_DIR = CONFIG_DIR / "presets"
 AGENTS_DIR = CONFIG_DIR / "agents"
 INSTALL_SCRIPTS_DIR = CONFIG_DIR / "install-scripts"
+# Private overlay, gitignored: the same layout as config/ (agents/, presets/,
+# install-scripts/). Files here add to the published config or override it, so
+# a checkout can be customised without changing a tracked file. See
+# docs/local-config.md.
+LOCAL_DIR = Path(os.environ.get("SANDBOX_LOCAL_CONFIG") or CONFIG_DIR / "local")
 BUILD_DIR = SANDBOX_ROOT / "build"
 # In-VM backends (dispatched by rootfs/overlay/opt/agent/start.sh) and the
 # capability preset each one needs baked into the image.
@@ -71,20 +76,69 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def preset_path(category: str, name: str) -> Path:
+    """Where a preset lives: the local overlay wins over the published one."""
+    local = LOCAL_DIR / "presets" / category / f"{name}.yaml"
+    return local if local.exists() else PRESETS_DIR / category / f"{name}.yaml"
+
+
+def preset_files(category: str) -> list:
+    """Every preset of a category, one path per name, local ones winning."""
+    found = {}
+    for base in (PRESETS_DIR, LOCAL_DIR / "presets"):
+        for path in sorted((base / category).glob("*.yaml")):
+            found[path.stem] = path
+    return [found[name] for name in sorted(found)]
+
+
+def install_script_path(name: str) -> Path:
+    local = LOCAL_DIR / "install-scripts" / name
+    return local if local.exists() else INSTALL_SCRIPTS_DIR / name
+
+
 def load_preset(category: str, name: str) -> dict:
-    path = PRESETS_DIR / category / f"{name}.yaml"
+    path = preset_path(category, name)
     if not path.exists():
         print(f"ERROR: Preset not found: {category}/{name} ({path})", file=sys.stderr)
         sys.exit(1)
     return load_yaml(path)
 
 
+def agent_sources(agent_type: str) -> list:
+    """The files that define an agent, lowest precedence first."""
+    paths = (AGENTS_DIR / f"{agent_type}.yaml", LOCAL_DIR / "agents" / f"{agent_type}.yaml")
+    return [p for p in paths if p.exists()]
+
+
+def agent_types() -> list:
+    """Every agent type, published or local."""
+    names = {p.stem for base in (AGENTS_DIR, LOCAL_DIR / "agents") for p in base.glob("*.yaml")}
+    return sorted(names)
+
+
+def merge_config(base, override):
+    """Lay `override` over `base`: mappings merge key by key, anything else
+    (scalars and lists) is replaced whole."""
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = merge_config(base[key], value) if key in base else value
+        return merged
+    return override
+
+
 def load_agent(agent_type: str) -> dict:
-    path = AGENTS_DIR / f"{agent_type}.yaml"
-    if not path.exists():
-        print(f"ERROR: Agent not found: {agent_type} ({path})", file=sys.stderr)
+    """An agent's definition: the published file with the local one laid over
+    it, or whichever of the two exists."""
+    sources = agent_sources(agent_type)
+    if not sources:
+        print(f"ERROR: Agent not found: {agent_type} "
+              f"(looked in {AGENTS_DIR} and {LOCAL_DIR / 'agents'})", file=sys.stderr)
         sys.exit(1)
-    return load_yaml(path)
+    agent = {}
+    for path in sources:
+        agent = merge_config(agent, load_yaml(path))
+    return agent
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +411,7 @@ def memory_plan(global_config: dict, agents: dict) -> dict:
 
 
 def _all_agents() -> dict:
-    return {p.stem: load_yaml(p) for p in sorted(AGENTS_DIR.glob("*.yaml"))}
+    return {name: load_agent(name) for name in agent_types()}
 
 
 def _hindsight_call(base_url: str, token: str, method: str, path: str, body=None):
@@ -551,11 +605,16 @@ def cmd_memory_apply(base_url: str = "", dry_run: bool = False):
 
 
 def load_global_config() -> dict:
+    """The site config: config/sandbox.yaml (this host's settings and every
+    secret; never committed) laid over the overlay's optional sandbox.yaml
+    (settings worth versioning: models, memory layout, mental models)."""
     path = CONFIG_DIR / "sandbox.yaml"
     if not path.exists():
         print(f"ERROR: Global config not found: {path}", file=sys.stderr)
         sys.exit(1)
-    return load_yaml(path)
+    shared = LOCAL_DIR / "sandbox.yaml"
+    base = load_yaml(shared) if shared.exists() else {}
+    return merge_config(base, load_yaml(path))
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +705,7 @@ def compile_customize_sh(agent: dict) -> str:
         lines.append("")
 
     for script_name in install_scripts:
-        script_path = INSTALL_SCRIPTS_DIR / script_name
+        script_path = install_script_path(script_name)
         if script_path.exists():
             # Each script runs in its own subshell: they are written as
             # standalone programs (own `set -e`, `exit 0` when the tool is
@@ -1052,33 +1111,33 @@ def cmd_validate(agent_type: str):
 
     # Validate egress presets
     for p in agent.get("egress", {}).get("presets", []):
-        path = PRESETS_DIR / "egress" / f"{p}.yaml"
+        path = preset_path("egress", p)
         if not path.exists():
             errors.append(f"Egress preset not found: {p}")
 
     # Validate capability presets
     for p in agent.get("capabilities", {}).get("presets", []):
-        path = PRESETS_DIR / "capabilities" / f"{p}.yaml"
+        path = preset_path("capabilities", p)
         if not path.exists():
             errors.append(f"Capability preset not found: {p}")
 
     # Validate prompt presets
     for p in agent.get("prompt", {}).get("presets", []):
-        path = PRESETS_DIR / "prompts" / f"{p}.yaml"
+        path = preset_path("prompts", p)
         if not path.exists():
             errors.append(f"Prompt preset not found: {p}")
 
     # Validate install scripts
     for s in agent.get("capabilities", {}).get("install_scripts", []):
-        path = INSTALL_SCRIPTS_DIR / s
+        path = install_script_path(s)
         if not path.exists():
             errors.append(f"Install script not found: {s}")
 
     # Check capability preset install scripts
     for p in agent.get("capabilities", {}).get("presets", []):
-        preset_path = PRESETS_DIR / "capabilities" / f"{p}.yaml"
-        if preset_path.exists():
-            preset = load_yaml(preset_path)
+        cap_path = preset_path("capabilities", p)
+        if cap_path.exists():
+            preset = load_yaml(cap_path)
             # Normalize install_script (str or list) + install_scripts (list)
             scripts = []
             is_field = preset.get("install_script", [])
@@ -1088,7 +1147,7 @@ def cmd_validate(agent_type: str):
                 scripts.extend(is_field)
             scripts.extend(preset.get("install_scripts", []))
             for s in scripts:
-                script = INSTALL_SCRIPTS_DIR / s
+                script = install_script_path(s)
                 if not script.exists():
                     warnings.append(f"Install script from preset {p}: {s} not found")
 
@@ -1111,31 +1170,34 @@ def cmd_validate(agent_type: str):
 
 def cmd_list():
     """List all available agent types."""
-    agents = sorted(AGENTS_DIR.glob("*.yaml"))
-    if not agents:
-        print("No agents defined in config/agents/")
+    names = agent_types()
+    if not names:
+        print("No agents defined in config/agents/ or config/local/agents/")
         return
     print("Available agents:")
-    for path in agents:
-        agent = load_yaml(path)
-        name = agent.get("agent", {}).get("name", "")
-        atype = path.stem
-        print(f"  {atype:<20} {name}")
+    for atype in names:
+        name = load_agent(atype).get("agent", {}).get("name", "")
+        local = LOCAL_DIR / "agents" / f"{atype}.yaml"
+        origin = ""
+        if local.exists():
+            origin = "  [local override]" if (AGENTS_DIR / f"{atype}.yaml").exists() else "  [local]"
+        print(f"  {atype:<20} {name}{origin}")
 
 
 def cmd_list_presets(category: str = None):
     """List available presets, optionally filtered by category."""
     categories = [category] if category else ["egress", "capabilities", "prompts"]
     for cat in categories:
-        cat_dir = PRESETS_DIR / cat
-        if not cat_dir.exists():
+        files = preset_files(cat)
+        if not files:
             continue
         print(f"\n{cat.upper()} presets:")
-        for path in sorted(cat_dir.glob("*.yaml")):
+        for path in files:
             preset = load_yaml(path)
             name = preset.get("name", path.stem)
             desc = preset.get("description", "")
-            print(f"  {name:<25} {desc}")
+            origin = "  [local]" if LOCAL_DIR in path.parents else ""
+            print(f"  {name:<25} {desc}{origin}")
 
 
 # ---------------------------------------------------------------------------
@@ -1221,8 +1283,8 @@ def main():
     elif cmd == "compile-all":
         cmd_compile_global()
         cmd_compile_gateway()
-        for path in sorted(AGENTS_DIR.glob("*.yaml")):
-            cmd_compile(path.stem)
+        for name in agent_types():
+            cmd_compile(name)
     elif cmd == "validate" and len(sys.argv) >= 3:
         ok = cmd_validate(sys.argv[2])
         sys.exit(0 if ok else 1)

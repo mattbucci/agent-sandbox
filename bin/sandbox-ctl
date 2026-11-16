@@ -438,9 +438,38 @@ cmd_config() {
         docs)
             python3 "${SANDBOX_ROOT}/lib/agentconf.py" docs
             ;;
+        init)
+            # Set up the private configuration (all of it gitignored): the
+            # host's sandbox.yaml and the local overlay. With a git URL the
+            # overlay is a clone of your own config repo. Never overwrites.
+            local local_dir repo="${1:-}"
+            local_dir="$(local_config_dir)"
+            if [[ -f "${SANDBOX_ROOT}/config/sandbox.yaml" ]]; then
+                log_info "config/sandbox.yaml exists; left as is"
+            else
+                (umask 077; cp "${SANDBOX_ROOT}/config/sandbox.yaml.example" "${SANDBOX_ROOT}/config/sandbox.yaml")
+                log_ok "Created config/sandbox.yaml from the example (edit llm.* and network.host_iface)"
+            fi
+            if [[ -n "${repo}" ]]; then
+                if [[ -e "${local_dir}" ]]; then
+                    log_error "${local_dir} already exists; clone into it yourself or remove it first."
+                    exit 1
+                fi
+                git clone "${repo}" "${local_dir}"
+            fi
+            mkdir -p "${local_dir}/agents" "${local_dir}/install-scripts" \
+                "${local_dir}/presets/egress" "${local_dir}/presets/capabilities" "${local_dir}/presets/prompts"
+            log_ok "Local overlay ready: ${local_dir}"
+            echo "  agents/            add an agent, or override a published one of the same name"
+            echo "  presets/           private egress / capabilities / prompts presets"
+            echo "  install-scripts/   private install scripts"
+            echo "  sandbox.yaml       optional shared settings (no secrets) under config/sandbox.yaml"
+            echo "See docs/local-config.md."
+            ;;
         *)
             echo "Usage: sandbox-ctl config <subcommand>"
             echo ""
+            echo "  init [git-url]       Create the private config (sandbox.yaml + config/local/, optionally cloned)"
             echo "  compile [type]       Compile agent YAML → build/ (all if no type)"
             echo "  validate <type>      Validate an agent YAML"
             echo "  list-presets [cat]   List available presets (egress|capabilities|prompts)"
@@ -1388,6 +1417,7 @@ Access:
   ssh <id|name|type>       SSH into a VM
 
 Config:
+  config init [git-url]    Create the private config (sandbox.yaml + config/local/)
   config compile [type]    Compile agent YAML → build/ (all if no type)
   config validate <type>   Validate an agent YAML definition
   config list-presets      List available presets by category

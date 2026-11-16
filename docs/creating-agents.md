@@ -2,6 +2,11 @@
 
 This guide walks through defining a new agent from scratch using the YAML configuration system.
 
+> To add or change agents without touching tracked files — the usual case for
+> your own deployment — put them in `config/local/agents/` instead of
+> `config/agents/`. Everything below applies unchanged; see
+> [local-config.md](local-config.md).
+
 ## Quick Start: Minimal Agent
 
 The simplest possible agent definition:

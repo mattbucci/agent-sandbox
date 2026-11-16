@@ -47,8 +47,8 @@ prompt:
 ## Quick Start
 
 ```bash
-# 1. Configure
-cp config/sandbox.yaml.example config/sandbox.yaml
+# 1. Configure (creates the untracked config/sandbox.yaml and config/local/)
+bin/sandbox-ctl config init
 vim config/sandbox.yaml   # set llm.api_base, llm.api_key, network.host_iface
 
 # 2. Setup (Firecracker, kernel, Squid, nftables, OTel, host hardening)
@@ -70,6 +70,9 @@ bin/sandbox-ctl ssh debugger       # SSH in (password: agent)
 ## Agents
 
 Built-in agents. Create your own by adding a YAML file — see [Creating Agents](docs/creating-agents.md).
+Your own agents, presets and settings go in the untracked `config/local/` — optionally
+a clone of your own private repo — so you can customise a checkout without publishing
+anything: see [Private configuration](docs/local-config.md).
 Each agent picks a harness: `deepagents` (default), `omp`
 ([oh-my-pi](docs/hermes-gateway.md#omp-harness-oh-my-pi), used by `coder`) or the
 real `hermes` container.

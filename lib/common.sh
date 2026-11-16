@@ -69,18 +69,28 @@ release_slot() {
 }
 
 # --- Agent type validation ---
-# One agent type per config/agents/<type>.yaml (other files are ignored).
+# One agent type per <type>.yaml in config/agents/ (published) or
+# config/local/agents/ (private, gitignored; see docs/local-config.md). A local
+# file with a published agent's name is laid over it by agentconf.py.
+local_config_dir() {
+    echo "${SANDBOX_LOCAL_CONFIG:-${SANDBOX_ROOT}/config/local}"
+}
+
 list_agent_types() {
     local f
-    for f in "${SANDBOX_ROOT}"/config/agents/*.yaml; do
+    for f in "${SANDBOX_ROOT}"/config/agents/*.yaml "$(local_config_dir)"/agents/*.yaml; do
         [[ -f "${f}" ]] || continue
         basename "${f}" .yaml
-    done | sort
+    done | sort -u
+}
+
+agent_type_exists() {
+    [[ -f "${SANDBOX_ROOT}/config/agents/$1.yaml" || -f "$(local_config_dir)/agents/$1.yaml" ]]
 }
 
 validate_agent_type() {
     local agent_type="$1"
-    if [[ ! -f "${SANDBOX_ROOT}/config/agents/${agent_type}.yaml" ]]; then
+    if ! agent_type_exists "${agent_type}"; then
         log_error "Unknown agent type: ${agent_type}"
         echo "Available types:"
         list_agent_types | sed 's/^/  /'
@@ -92,14 +102,27 @@ validate_agent_type() {
 ensure_compiled() {
     local agent_type="$1"
     local build_dir="${SANDBOX_ROOT}/build/${agent_type}"
-    local agent_yaml="${SANDBOX_ROOT}/config/agents/${agent_type}.yaml"
+    local stale="" src
 
-    # Recompile if the build dir is missing, or the agent YAML / pinned versions
-    # (inlined into customize.sh) are newer than the compiled output.
-    if [[ ! -d "${build_dir}" ]] \
-        || [[ "${agent_yaml}" -nt "${build_dir}/agent.conf" ]] \
-        || [[ "${SANDBOX_ROOT}/config/versions.env" -nt "${build_dir}/agent.conf" ]] \
-        || [[ "${SANDBOX_ROOT}/lib/versions.sh" -nt "${build_dir}/agent.conf" ]]; then
+    # Recompile if the build dir is missing, or anything the compiled output is
+    # made from is newer than it: the agent's YAML (published or local), the
+    # presets and install scripts it may pull in, and the pinned versions
+    # (inlined into customize.sh).
+    if [[ ! -f "${build_dir}/agent.conf" ]]; then
+        stale=1
+    else
+        for src in "${SANDBOX_ROOT}/config/agents/${agent_type}.yaml" \
+                   "$(local_config_dir)/agents/${agent_type}.yaml" \
+                   "${SANDBOX_ROOT}/config/versions.env" "${SANDBOX_ROOT}/lib/versions.sh"; do
+            [[ "${src}" -nt "${build_dir}/agent.conf" ]] && stale=1
+        done
+        for src in "${SANDBOX_ROOT}/config/presets" "${SANDBOX_ROOT}/config/install-scripts" \
+                   "$(local_config_dir)/presets" "$(local_config_dir)/install-scripts"; do
+            [[ -d "${src}" ]] || continue
+            [[ -n "$(find "${src}" -type f -newer "${build_dir}/agent.conf" -print -quit)" ]] && stale=1
+        done
+    fi
+    if [[ -n "${stale}" ]]; then
         log_info "Compiling agent config: ${agent_type}"
         python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile "${agent_type}"
     fi
@@ -110,7 +133,8 @@ ensure_global_compiled() {
     local global_yaml="${SANDBOX_ROOT}/config/sandbox.yaml"
 
     if [[ -f "${global_yaml}" ]]; then
-        if [[ ! -f "${build_conf}" ]] || [[ "${global_yaml}" -nt "${build_conf}" ]]; then
+        if [[ ! -f "${build_conf}" ]] || [[ "${global_yaml}" -nt "${build_conf}" ]] \
+            || [[ "$(local_config_dir)/sandbox.yaml" -nt "${build_conf}" ]]; then
             python3 "${SANDBOX_ROOT}/lib/agentconf.py" compile-global 2>/dev/null
         fi
     fi
