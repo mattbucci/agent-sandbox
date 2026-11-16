@@ -128,9 +128,11 @@ Tools provided:
 Container management and runtime
 
 apt: `docker.io`
+Install script: `['docker-compose.sh']`
 
 Tools provided:
 - **docker** — Container management CLI
+- **docker compose** — Multi-container orchestration (Compose v2 plugin)
 
 ### `github-cli`
 GitHub CLI for repository management and code review
@@ -158,6 +160,14 @@ Tools provided:
 - **typescript** — TypeScript compiler and type checker
 - **eslint** — JavaScript and TypeScript linter
 - **prettier** — Opinionated code formatter
+
+### `omp`
+oh-my-pi coding agent CLI — required by agents with `harness: omp`
+
+Install script: `omp.sh`
+
+Tools provided:
+- **omp** — oh-my-pi coding agent (the harness driving this agent; also usable as a CLI)
 
 ### `python-dev`
 Python development and testing tools

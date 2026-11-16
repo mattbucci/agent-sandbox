@@ -69,7 +69,10 @@ bin/sandbox-ctl ssh debugger       # SSH in (password: agent)
 
 ## Agents
 
-Five built-in agents. Create your own by adding a YAML file — see [Creating Agents](docs/creating-agents.md).
+Built-in agents. Create your own by adding a YAML file — see [Creating Agents](docs/creating-agents.md).
+Each agent picks a harness: `deepagents` (default), `omp`
+([oh-my-pi](docs/hermes-gateway.md#omp-harness-oh-my-pi), used by `coder`) or the
+real `hermes` container.
 
 | Agent | Role | Allowed Domains |
 |-------|------|-----------------|
@@ -78,6 +81,7 @@ Five built-in agents. Create your own by adding a YAML file — see [Creating Ag
 | **devops** | Deployments, feature flags, rollbacks | github, terraform, k8s, cloud |
 | **researcher** | HN, Reddit, arxiv trend monitoring | news sites, arxiv, reddit |
 | **security** | CVE scanning, dependency auditing | nvd.nist.gov, github, cve.org |
+| **coder** | Coding specialist on the omp harness | github, npm, pypi |
 
 ## Configuration
 

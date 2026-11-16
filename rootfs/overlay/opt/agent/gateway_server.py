@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-In-VM OpenAI-compatible gateway server — DeepAgents harness adapter.
+In-VM OpenAI-compatible gateway server — DeepAgents and omp harness adapter.
 
-This is the *deepagents* harness adapter: a plain stdlib HTTP server that exposes
-the Hermes Gateway wire contract on 0.0.0.0:GATEWAY_PORT (default 8642) INSIDE the
-Firecracker VM, and fulfils each request by driving the DeepAgents agent built by
-agent.create_agent(). The bare-metal Go router reverse-proxies (streaming SSE) to
-this server at <vm_ip>:8642.
+A plain stdlib HTTP server that exposes the Hermes Gateway wire contract on
+0.0.0.0:GATEWAY_PORT (default 8642) INSIDE the Firecracker VM, and fulfils each
+request by driving the agent the HARNESS setting selects:
+
+  deepagents (default)  the DeepAgents agent built by agent.create_agent()
+  omp                   oh-my-pi, one `omp --mode rpc` process per session
+                        (omp_agent.py), behind the same ainvoke/astream surface
+
+The bare-metal Go router reverse-proxies (streaming SSE) to this server at
+<vm_ip>:8642.
 
 Other harnesses may REPLACE this file as long as they honour the SAME :8642 wire
 contract (OpenAI-compatible /v1/chat/completions SSE, /v1/models, /v1/capabilities,
@@ -20,7 +25,8 @@ Configuration (from /etc/agent.conf via the environment):
   GATEWAY_PORT    - bind port (default 8642)
   API_SERVER_KEY  - downstream bearer; empty => no auth required on /v1/*
   AGENT_TYPE      - advertised model id on /v1/models
-  LLM_*           - consumed by agent.create_agent()
+  HARNESS         - "deepagents" (default) or "omp"
+  LLM_*           - consumed by agent.create_agent() / omp_agent.OmpConfig
 """
 
 import asyncio
@@ -87,6 +93,7 @@ def _otel_extract(carrier):
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8642") or "8642")
 API_SERVER_KEY = os.environ.get("API_SERVER_KEY", "") or ""
 AGENT_TYPE = os.environ.get("AGENT_TYPE", "generic")
+HARNESS = (os.environ.get("HARNESS", "deepagents") or "deepagents").strip()
 DEFAULT_SESSION = "default"
 
 # ---------------------------------------------------------------------------
@@ -154,7 +161,7 @@ def _evict_sessions_locked():
         logger.info("session %s evicted (LRU, over cap of %d sessions)",
                     victim, MAX_SESSIONS)
 
-# Lazily-built, reused DeepAgents agent.
+# Lazily-built, reused agent (DeepAgents graph or OmpAgent, per HARNESS).
 _AGENT = None
 _AGENT_LOCK = threading.Lock()
 
@@ -163,12 +170,29 @@ _TRACING_CALLBACKS = []
 
 
 def get_agent():
-    """Build the DeepAgents agent once, then reuse it for every request."""
+    """Build the harness's agent once, then reuse it for every request."""
     global _AGENT
     with _AGENT_LOCK:
         if _AGENT is None:
-            _AGENT = create_agent(callbacks=_TRACING_CALLBACKS)
+            if HARNESS == "omp":
+                # Imported lazily: the deepagents harness never needs it.
+                from omp_agent import create_omp_agent
+                _AGENT = create_omp_agent(callbacks=_TRACING_CALLBACKS)
+            else:
+                _AGENT = create_agent(callbacks=_TRACING_CALLBACKS)
         return _AGENT
+
+
+def agent_for_session(ag, session_id):
+    """Bind `ag` to one conversation when the harness keeps its own history.
+
+    DeepAgents is stateless — the full history is passed on every call — so it
+    is returned as-is. A stateful harness (omp) exposes for_session() and keeps
+    one conversation per session id; it reads only the newest user message from
+    the agent input.
+    """
+    bind = getattr(ag, "for_session", None)
+    return bind(session_id) if callable(bind) else ag
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +284,7 @@ async def _drive_run(ctx, user_message, session_id):
     new_user = {"role": "user", "content": user_message}
     agent_input = {"messages": history + [new_user]}
     try:
-        ag = get_agent()
+        ag = agent_for_session(get_agent(), session_id)
         token = approvals.current_run.set(ctx)
         try:
             result = await ag.ainvoke(agent_input)
@@ -699,7 +723,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         }
 
         try:
-            ag = get_agent()
+            ag = agent_for_session(get_agent(), sid)
         except Exception as e:
             logger.exception("agent build failed")
             if stream:
@@ -821,8 +845,8 @@ def main():
     _TRACING_CALLBACKS = init_tracing() or []
     loop = get_loop()  # start the persistent async loop thread before serving requests
     asyncio.run_coroutine_threadsafe(_run_sweeper(), loop)  # GC terminal runs
-    logger.info("hermes in-VM gateway (deepagents adapter) starting on 0.0.0.0:%d "
-                "(agent=%s, auth=%s)", GATEWAY_PORT, AGENT_TYPE,
+    logger.info("hermes in-VM gateway (%s harness) starting on 0.0.0.0:%d "
+                "(agent=%s, auth=%s)", HARNESS, GATEWAY_PORT, AGENT_TYPE,
                 "on" if API_SERVER_KEY else "off")
     httpd = ThreadingHTTPServer(("0.0.0.0", GATEWAY_PORT), GatewayHandler)
     httpd.daemon_threads = True

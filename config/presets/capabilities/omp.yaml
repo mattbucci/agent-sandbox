@@ -1,0 +1,6 @@
+name: omp
+description: "oh-my-pi coding agent CLI — required by agents with `harness: omp`"
+install_script: omp.sh
+provides_tools:
+  - name: omp
+    description: "oh-my-pi coding agent (the harness driving this agent; also usable as a CLI)"

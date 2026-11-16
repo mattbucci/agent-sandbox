@@ -1,6 +1,9 @@
 agent:
   type: coder
   name: "Coding Specialist (North-Mini-Code)"
+  # oh-my-pi drives this agent: the in-VM gateway runs one `omp --mode rpc`
+  # process per session instead of DeepAgents. Needs the `omp` capability.
+  harness: omp
 
 vm:
   vcpus: 4
@@ -20,7 +23,7 @@ github:
   permissions: [contents:write, issues:read, pull_requests:write]
 
 capabilities:
-  presets: [github-cli, python-dev, node-dev, docker]
+  presets: [omp, github-cli, python-dev, node-dev, docker]
   packages:
     apt: [shellcheck]
 
